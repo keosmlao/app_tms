@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "330692890121",
+    "project_id": "odgtms-cac22",
+    "storage_bucket": "odgtms-cac22.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:330692890121:android:a59474aceef6a46fffb2d8",
+        "android_client_info": {
+          "package_name": "com.odg.odgtms"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDOKBX549G8fByLpI_CYF3j3KBalqXXYB0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
