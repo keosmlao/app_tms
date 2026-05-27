@@ -12,6 +12,7 @@ import '../services/offline_outbox.dart';
 import 'outbox_screen.dart';
 import 'fuel_refill_screen.dart';
 import 'fuel_screen.dart';
+import 'inspection_list_screen.dart';
 import 'jobs_screen.dart';
 
 /// Hub home: greeting + two big module cards (delivery + fuel) with live
@@ -29,8 +30,12 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   List<DeliveryJob> _jobs = const [];
   FuelLogList? _fuel;
+  int _totalInspections = 0;
+  int _pendingInspections = 0;
+  int _approvedInspections = 0;
   bool _loadingJobs = true;
   bool _loadingFuel = true;
+  bool _loadingInspections = false;
   String? _jobsError;
   String? _fuelError;
 
@@ -44,7 +49,7 @@ class _HomeShellState extends State<HomeShell> {
     // Refresh feature flags alongside the home data — admin toggles in the
     // dashboard take effect on the next pull-to-refresh / app reopen.
     unawaited(widget.controller.loadSettings());
-    await Future.wait([_fetchJobs(), _fetchFuel()]);
+    await Future.wait([_fetchJobs(), _fetchFuel(), _fetchInspections()]);
   }
 
   Future<void> _fetchJobs() async {
@@ -94,6 +99,40 @@ class _HomeShellState extends State<HomeShell> {
         _fuelError = e is ApiException ? e.message : '$e';
       });
     }
+  }
+
+  Future<void> _fetchInspections() async {
+    final user = widget.controller.user;
+    if (user == null) return;
+    setState(() => _loadingInspections = true);
+    try {
+      final records = await widget.controller.api.getInspections(
+        driverCode: user.code,
+        pendingOnly: false,
+      );
+      if (!mounted) return;
+      setState(() {
+        _totalInspections = records.length;
+        _pendingInspections =
+            records.where((r) => r.approvalStatus == 'pending').length;
+        _approvedInspections =
+            records.where((r) => r.approvalStatus == 'approved').length;
+        _loadingInspections = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loadingInspections = false);
+    }
+  }
+
+  Future<void> _openInspection() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) =>
+            InspectionListScreen(controller: widget.controller),
+      ),
+    );
+    if (mounted) _fetchInspections();
   }
 
   Future<void> _logout() async {
@@ -184,6 +223,8 @@ class _HomeShellState extends State<HomeShell> {
               _jobsCard(),
               const SizedBox(height: 12),
               _fuelCard(),
+              const SizedBox(height: 12),
+              _inspectionCard(),
               const SizedBox(height: 22),
               _sectionLabel(icon: Icons.flash_on_rounded, label: 'ດຳເນີນການໄວ'),
               const SizedBox(height: 10),
@@ -441,6 +482,34 @@ class _HomeShellState extends State<HomeShell> {
         _StatItem(
           label: 'ຍອດເງິນ',
           value: _fmt(_fuel?.totalAmount ?? 0),
+          color: AppTheme.success,
+        ),
+      ],
+    );
+  }
+
+  Widget _inspectionCard() {
+    return _ModuleCard(
+      title: 'ກວດສະພາບລົດ',
+      subtitle: 'ກວດ ແລະ ສົ່ງໃຫ້ຫົວໜ້າອານຸມັດ',
+      icon: Icons.fact_check_rounded,
+      accent: AppTheme.info,
+      onTap: _openInspection,
+      loading: _loadingInspections,
+      error: null,
+      mainStat: _StatItem(
+        label: 'ທັງໝົດ',
+        value: _totalInspections.toString(),
+      ),
+      subStats: [
+        _StatItem(
+          label: 'ລໍຖ້າ',
+          value: _pendingInspections.toString(),
+          color: _pendingInspections > 0 ? AppTheme.warning : AppTheme.textMuted,
+        ),
+        _StatItem(
+          label: 'ອານຸມັດ',
+          value: _approvedInspections.toString(),
           color: AppTheme.success,
         ),
       ],

@@ -10,6 +10,7 @@ import '../models/delivery_bill.dart';
 import '../models/delivery_item.dart';
 import '../models/delivery_job.dart';
 import '../models/fuel_log.dart';
+import '../models/inspection.dart';
 import '../models/mobile_settings.dart';
 import 'local_cache.dart';
 import 'offline_outbox.dart';
@@ -529,6 +530,89 @@ class ApiClient {
       'lat': lat,
       'lng': lng,
     });
+  }
+
+  // ─── Inspection ──────────────────────────────────────────────────────────
+
+  Future<List<DriverCar>> getDriverCars({required String driverId}) async {
+    final body = await _get('/api/mobile/cars', {'driver_id': driverId});
+    if (body is! List) return const [];
+    return body
+        .whereType<Map>()
+        .map((r) => DriverCar.fromJson(Map<String, dynamic>.from(r)))
+        .toList();
+  }
+
+  Future<InspectMeta> getInspectMeta() async {
+    final body = await _get('/api/mobile/inspect-meta');
+    if (body is Map<String, dynamic>) return InspectMeta.fromJson(body);
+    return const InspectMeta(items: [], statuses: []);
+  }
+
+  Future<List<InspectionRecord>> getInspections({
+    String? driverCode,
+    String? dateFrom,
+    String? dateTo,
+    bool pendingOnly = false,
+  }) async {
+    final body = await _get('/api/mobile/inspections', {
+      'driver_code': driverCode,
+      'dateFrom': dateFrom,
+      'dateTo': dateTo,
+      'pending_only': pendingOnly ? '1' : null,
+    });
+    if (body is! List) return const [];
+    return body
+        .whereType<Map>()
+        .map((r) => InspectionRecord.fromJson(Map<String, dynamic>.from(r)))
+        .toList();
+  }
+
+  Future<InspectionRecord> submitInspection({
+    required String vehicleCode,
+    required String inspectDate,
+    String? inspectTime,
+    String? driverCode,
+    double? odometer,
+    String? note,
+    required List<Map<String, dynamic>> details,
+  }) async {
+    final body = await _post('/api/mobile/inspections', {
+      'vehicle_code': vehicleCode,
+      'inspect_date': inspectDate,
+      if (inspectTime != null) 'inspect_time': inspectTime,
+      if (driverCode != null && driverCode.isNotEmpty) 'driver_code': driverCode,
+      if (odometer != null) 'odometer': odometer,
+      if (note != null && note.isNotEmpty) 'note': note,
+      'details': details,
+    });
+    if (body is Map<String, dynamic>) return InspectionRecord.fromJson(body);
+    throw const ApiException('ເກີດຂໍ້ຜິດພາດໃນການສົ່ງຂໍ້ມູນ');
+  }
+
+  Future<InspectionRecord> getInspectionDetail(String inspectCode) async {
+    final body = await _get('/api/mobile/inspections/$inspectCode');
+    if (body is Map<String, dynamic>) return InspectionRecord.fromJson(body);
+    throw const ApiException('ບໍ່ພົບຂໍ້ມູນການກວດ');
+  }
+
+  Future<void> approveInspection({
+    required String inspectCode,
+    required String action,
+    String? note,
+  }) async {
+    final response = await http
+        .patch(
+          _uri('/api/mobile/inspections/$inspectCode'),
+          headers: _headers(json: true),
+          body: jsonEncode({
+            'action': action,
+            if (note != null && note.isNotEmpty) 'note': note,
+          }),
+        )
+        .timeout(AppConfig.requestTimeout);
+    final body = await _decodeResponse(response);
+    if (response.statusCode >= 400) _throwRequestError(response, body);
   }
 
   // Fetch the driver's fuel-refill history (most recent first).
