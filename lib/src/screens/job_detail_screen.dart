@@ -9,7 +9,8 @@ import 'package:signature/signature.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'checkin_map_screen.dart';
-import 'qr_scan_screen.dart';
+import 'qr_find_screen.dart';
+import 'route_screen.dart';
 
 import '../app_controller.dart';
 import '../core/app_theme.dart';
@@ -17,15 +18,20 @@ import '../models/delivery_bill.dart';
 import '../models/delivery_item.dart';
 import '../models/delivery_job.dart';
 import '../services/api_client.dart';
+import '../services/location_tracking_service.dart';
+import '../services/local_cache.dart';
 import '../services/offline_outbox.dart';
+import '../widgets/gps_tracking_banner.dart';
 
 class JobDetailScreen extends StatefulWidget {
   final AppController controller;
   final DeliveryJob initialJob;
+  final bool readOnly;
   const JobDetailScreen({
     super.key,
     required this.controller,
     required this.initialJob,
+    this.readOnly = false,
   });
   @override
   State<JobDetailScreen> createState() => _JobDetailScreenState();
@@ -39,46 +45,15 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
   String? _expandedBillNo;
   List<DeliveryItem> _expandedItems = const [];
   bool _loadingItems = false;
-
-  // Location tracking for travel history
-  Timer? _locationTimer;
-  static const _locationInterval = Duration(seconds: 5);
+  bool _lastLoadUsedCache = false;
+  DateTime? _jobsCacheAt;
+  DateTime? _billsCacheAt;
 
   @override
   void initState() {
     super.initState();
     _job = widget.initialJob;
     _loadData();
-    _startLocationTracking();
-  }
-
-  @override
-  void dispose() {
-    _locationTimer?.cancel();
-    super.dispose();
-  }
-
-  void _startLocationTracking() {
-    _locationTimer?.cancel();
-    _locationTimer = Timer.periodic(_locationInterval, (_) => _saveLocation());
-  }
-
-  Future<void> _saveLocation() async {
-    if (_job.jobStatus != 2) return; // Only track during dispatch
-    try {
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-        ),
-      );
-      await widget.controller.api.saveTravelHistory(
-        docNo: _job.docNo,
-        lat: pos.latitude.toString(),
-        lng: pos.longitude.toString(),
-      );
-    } catch (_) {
-      // Silently fail - don't interrupt user
-    }
   }
 
   // GPS-bound location resolver — actions that need lat/lng (start_dispatch,
@@ -102,15 +77,16 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     if (perm == LocationPermission.denied) {
       throw Exception('ກະລຸນາອະນຸຍາດການເຂົ້າເຖິງ GPS');
     }
-    final pos = await Geolocator.getCurrentPosition(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-      ),
-    ).timeout(
-      const Duration(seconds: 15),
-      onTimeout: () =>
-          throw Exception('ບໍ່ສາມາດອ່ານ GPS ໄດ້ — ກະລຸນາລອງໃໝ່'),
-    );
+    final pos =
+        await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+          ),
+        ).timeout(
+          const Duration(seconds: 15),
+          onTimeout: () =>
+              throw Exception('ບໍ່ສາມາດອ່ານ GPS ໄດ້ — ກະລຸນາລອງໃໝ່'),
+        );
     return {'lat': pos.latitude.toString(), 'lng': pos.longitude.toString()};
   }
 
@@ -119,20 +95,37 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     // refreshes don't double up with the busy overlay already on screen.
     if (!silent) setState(() => _loading = true);
     try {
+      final api = widget.controller.api;
+      final jobsRequest = widget.controller.user?.isOperationsUser == true
+          ? api.getSupervisorJobs()
+          : api.getJobs(driverId: widget.controller.user!.driverId);
       final results = await Future.wait([
-        widget.controller.api.getJobs(
-          driverId: widget.controller.user!.driverId,
-        ),
-        widget.controller.api.getBills(docNo: _job.docNo),
+        jobsRequest,
+        api.getBills(docNo: _job.docNo),
+        LocalCache.instance.jobsSavedAt(widget.controller.user!.driverId),
+        LocalCache.instance.billsSavedAt(_job.docNo),
       ]);
       final jobs = results[0] as List<DeliveryJob>;
       final bills = results[1] as List<DeliveryBill>;
+      final jobsCacheAt = results[2] as DateTime?;
+      final billsCacheAt = results[3] as DateTime?;
       final updated = jobs.where((j) => j.docNo == _job.docNo).firstOrNull;
       setState(() {
         if (updated != null) _job = updated;
         _bills = bills;
+        _lastLoadUsedCache = api.lastFetchUsedCache;
+        _jobsCacheAt = jobsCacheAt;
+        _billsCacheAt = billsCacheAt;
         if (!silent) _loading = false;
       });
+      // Start/stop continuous GPS tracking immediately when this trip's dispatch
+      // state changes (e.g. right after "ເລີ່ມຈັດສົ່ງ" or "ປິດງານ").
+      LocationTrackingService.instance.sync(
+        jobs: jobs,
+        baseUrl: widget.controller.baseUrl,
+        authToken: widget.controller.user!.token,
+        driverId: widget.controller.user!.driverId,
+      );
     } catch (e) {
       if (!silent) setState(() => _loading = false);
       if (mounted) {
@@ -206,9 +199,8 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
         optimisticUpdate();
       }
 
-      widget.controller.api.resetFetchState();
       await _loadData(silent: true);
-      final usedCache = widget.controller.api.lastFetchUsedCache;
+      final usedCache = _lastLoadUsedCache;
 
       // _loadData overwrote _bills with whatever getBills returned. If that
       // was the stale pre-action cache, the optimistic flip just got undone —
@@ -224,15 +216,14 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
           msg = 'ບໍ່ມີເນັດ — ບັນທຶກໄວ້, ຈະສົ່ງເມື່ອມີສັນຍານ';
           bg = AppTheme.warning;
         } else if (usedCache) {
-          msg =
-              '$successMsg — ໂຫຼດຂໍ້ມູນໃໝ່ບໍ່ໄດ້, ດຶງລົງເພື່ອອັບເດດ';
+          msg = '$successMsg — ໂຫຼດຂໍ້ມູນໃໝ່ບໍ່ໄດ້, ດຶງລົງເພື່ອອັບເດດ';
           bg = AppTheme.warning;
         } else {
           msg = successMsg;
         }
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(msg), backgroundColor: bg),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(msg), backgroundColor: bg));
       }
     } catch (e) {
       if (mounted) {
@@ -242,6 +233,32 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
       }
     } finally {
       setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _approveAsSupervisor() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await widget.controller.api.approveJob(_job.docNo);
+      await _loadData(silent: true);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('ອະນຸມັດ ${_job.docNo} ແລ້ວ'),
+          backgroundColor: AppTheme.success,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('ອະນຸມັດບໍ່ໄດ້: ${e is ApiException ? e.message : e}'),
+          backgroundColor: AppTheme.error,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -459,6 +476,165 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     }
   }
 
+  // Receive goods at the customer's home/shop for a '__CUSTOMER__' pickup bill.
+  // Two captures before sending: (1) GPS confirmation on the map, then (2) a
+  // proof photo + the customer's signature. On success the bill moves to the
+  // "pickup" phase — the driver then does the normal Check in + ສຳເລັດ at the
+  // delivery destination (a separate, second leg).
+  Future<void> _receiveFromCustomer(DeliveryBill b) async {
+    // CheckinMapScreen pops a geolocator Position (untyped here, mirroring
+    // _checkInBill — the screen returns null on cancel).
+    final pos = await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => CheckinMapScreen(bill: b)));
+    if (pos == null || !mounted) return; // GPS step cancelled
+
+    final r = await Navigator.of(context).push<_ReceivePickupResult>(
+      MaterialPageRoute(builder: (_) => _ReceivePickupPage(bill: b)),
+    );
+    if (r == null) return; // photo/signature step cancelled
+
+    final lat = pos.latitude.toString();
+    final lng = pos.longitude.toString();
+
+    // Other customer-pickup bills still waiting at the SAME customer — offer to
+    // receive them all with this one photo + signature + GPS so the driver
+    // doesn't repeat the capture per bill.
+    final siblings = _bills
+        .where(
+          (x) =>
+              x.billNo != b.billNo &&
+              x.pickupTransportCode == '__CUSTOMER__' &&
+              x.custCode == b.custCode &&
+              x.canPickup,
+        )
+        .toList();
+    bool applyToSiblings = false;
+    if (siblings.isNotEmpty && mounted) {
+      applyToSiblings = await _askApplyReceiveToSiblings(b, siblings) ?? false;
+    }
+
+    DeliveryBill toPickup(DeliveryBill bill) =>
+        bill.copyWith(phase: 'pickup', status: 0, statusText: 'ເບີກເຄື່ອງແລ້ວ');
+
+    await _runAction(
+      () async {
+        await widget.controller.api.receiveCustomerPickup(
+          billNo: b.billNo,
+          lat: lat,
+          lng: lng,
+          photo: r.photo,
+          signature: r.signature,
+        );
+        if (applyToSiblings) {
+          for (final sib in siblings) {
+            try {
+              await widget.controller.api.receiveCustomerPickup(
+                billNo: sib.billNo,
+                lat: lat,
+                lng: lng,
+                photo: r.photo,
+                signature: r.signature,
+              );
+            } catch (_) {
+              // Don't fail the batch if one sibling errors — the main bill is
+              // received and the driver can retry the sibling individually.
+            }
+          }
+        }
+      },
+      applyToSiblings
+          ? 'ຮັບສິນຄ້າຈາກລານລູກຄ້າ ${1 + siblings.length} ບິນແລ້ວ'
+          : 'ຮັບສິນຄ້າຈາກລານລູກຄ້າແລ້ວ',
+      // recipt_job set, sent_start left NULL → bill lands in the "pickup" phase.
+      optimisticUpdate: () {
+        _applyLocalBillUpdate(b.billNo, toPickup);
+        if (applyToSiblings) {
+          for (final sib in siblings) {
+            _applyLocalBillUpdate(sib.billNo, toPickup);
+          }
+        }
+      },
+    );
+  }
+
+  Future<bool?> _askApplyReceiveToSiblings(
+    DeliveryBill main,
+    List<DeliveryBill> siblings,
+  ) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.bgDark,
+        title: const Text(
+          'ຮັບຫຼາຍບິນພ້ອມກັນ',
+          style: TextStyle(color: AppTheme.textBright),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'ມີອີກ ${siblings.length} ບິນ ທີ່ຕ້ອງຮັບຈາກລານ ${main.custName} ຄືກັນ:',
+              style: const TextStyle(color: AppTheme.textMuted, fontSize: 13),
+            ),
+            const SizedBox(height: 8),
+            for (final sib in siblings)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Text(
+                  '• ${sib.billNo}',
+                  style: const TextStyle(
+                    color: AppTheme.textBright,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 12),
+            const Text(
+              'ໃຊ້ ຮູບ + ລາຍເຊັນ ນີ້ກັບທຸກບິນບໍ?',
+              style: TextStyle(color: AppTheme.textBright, fontSize: 13),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('ບໍ່ — ຮັບແຕ່ບິນນີ້'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.success),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('ໃຊ້ກັບ ${1 + siblings.length} ບິນ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Open the nearest-neighbour route over the trip's remaining stops.
+  Future<void> _openRoute() async {
+    HapticFeedback.selectionClick();
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) =>
+            RouteScreen(bills: _bills.where((b) => !b.isFinished).toList()),
+      ),
+    );
+  }
+
+  // Open a full-screen viewer for the proof captured at the customer's yard.
+  // Bytes are fetched on demand (the list only carries has_recipt_img flags).
+  Future<void> _viewPickupProof(DeliveryBill b) async {
+    HapticFeedback.selectionClick();
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => _PickupProofViewer(api: widget.controller.api, bill: b),
+      ),
+    );
+  }
+
   // Group bills by pickup point (warehouse name or "ບ້ານ/ຮ້ານລູກຄ້າ"). Bills
   // without a pickup_transport_name fall under "ບໍ່ໄດ້ກຳນົດ" so they're still
   // visible. Insertion order is preserved by LinkedHashMap (Dart default).
@@ -491,9 +667,7 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
       child: Row(
         children: [
           Icon(
-            isCustomerPickup
-                ? Icons.home_outlined
-                : Icons.warehouse_outlined,
+            isCustomerPickup ? Icons.home_outlined : Icons.warehouse_outlined,
             size: 14,
             color: AppTheme.primary,
           ),
@@ -525,10 +699,7 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
               ),
               style: TextButton.styleFrom(
                 foregroundColor: AppTheme.primary,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 8,
-                  vertical: 0,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
                 minimumSize: const Size(0, 28),
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
@@ -538,18 +709,16 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     );
   }
 
+  // One tap: silently capture the current GPS (check-in) and go straight to the
+  // complete form — no separate map-confirm step or second "ສຳເລັດ" press.
   Future<void> _checkInBill(DeliveryBill b) async {
-    // Open the map screen so the driver can verify location before sending.
-    final pos = await Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => CheckinMapScreen(bill: b)));
-    if (pos == null) return; // user cancelled
     setState(() => _busy = true);
     try {
+      final loc = await _getLocation();
       await widget.controller.api.checkInBill(
         billNo: b.billNo,
-        lat: pos.latitude.toString(),
-        lng: pos.longitude.toString(),
+        lat: loc['lat']!,
+        lng: loc['lng']!,
       );
       await _loadData(silent: true);
       if (!mounted) return;
@@ -609,11 +778,13 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     final siblings = b.parentBillNo.isEmpty
         ? const <DeliveryBill>[]
         : _bills
-              .where((x) =>
-                  x.billNo != b.billNo &&
-                  x.parentBillNo == b.parentBillNo &&
-                  x.custCode == b.custCode &&
-                  (x.phase == 'pickup' || x.phase == 'inprogress'))
+              .where(
+                (x) =>
+                    x.billNo != b.billNo &&
+                    x.parentBillNo == b.parentBillNo &&
+                    x.custCode == b.custCode &&
+                    (x.phase == 'pickup' || x.phase == 'inprogress'),
+              )
               .toList();
     bool applyToSiblings = false;
     if (siblings.isNotEmpty && mounted) {
@@ -633,6 +804,8 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
           lng: l['lng'],
           latEnd: l['lat'],
           lngEnd: l['lng'],
+          collectedAmount: r.collectedAmount,
+          paymentMethod: r.paymentMethod,
         );
         if (applyToSiblings) {
           for (final sib in siblings) {
@@ -714,7 +887,10 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                 child: Text(
                   '• ${sib.billNo}'
                   '${sib.pickupTransportName.isNotEmpty ? " (${sib.pickupTransportName})" : ""}',
-                  style: const TextStyle(color: AppTheme.textBright, fontSize: 12),
+                  style: const TextStyle(
+                    color: AppTheme.textBright,
+                    fontSize: 12,
+                  ),
                 ),
               ),
             const SizedBox(height: 12),
@@ -740,24 +916,26 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
   }
 
   Future<void> _cancelBill(DeliveryBill b) async {
-    final comment = await showDialog<String>(
+    final r = await showDialog<_CancelResult>(
       context: context,
       builder: (_) => _CancelDialog(billNo: b.billNo),
     );
-    if (comment == null || comment.isEmpty) return;
+    if (r == null || r.comment.isEmpty) return;
     await _runAction(
       () async {
         final l = await _getLocation();
         await widget.controller.api.cancelBill(
           billNo: b.billNo,
-          comment: comment,
+          comment: r.comment,
+          reasonCode: r.reasonCode,
+          rescheduleDate: r.rescheduleDate,
           lat: l['lat'],
           lng: l['lng'],
           latEnd: l['lat'],
           lngEnd: l['lng'],
         );
       },
-      'ຍົກເລີກບິນແລ້ວ',
+      r.rescheduleDate != null ? 'ນັດສົ່ງໃໝ່ແລ້ວ' : 'ຍົກເລີກບິນແລ້ວ',
       optimisticUpdate: () => _applyLocalBillUpdate(
         b.billNo,
         (bill) => bill.copyWith(
@@ -769,14 +947,54 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     );
   }
 
-  Future<void> _scanBillQr(DeliveryBill b) async {
+  // Floating "Scan ສຳເລັດ": scan any delivery-point QR, find the matching bill
+  // in this trip, verify the driver is within 50 m of the point, then run the
+  // same complete flow as method 1 (check-in + ສຳເລັດ).
+  Future<void> _scanCompleteAnyBill() async {
     HapticFeedback.selectionClick();
-    await Navigator.of(context).push(
+    final r = await Navigator.of(context).push<QrFindResult>(
       MaterialPageRoute(
         fullscreenDialog: true,
-        builder: (_) => QrScanVerifyScreen(bill: b),
+        builder: (_) => const QrFindScreen(),
       ),
     );
+    if (r == null || !mounted) return;
+    void snack(String m) => ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(m)));
+
+    final pos = r.pos;
+    if (pos == null) {
+      snack(r.gpsError ?? 'ບໍ່ສາມາດອ່ານ GPS — ລອງໃໝ່');
+      return;
+    }
+    final dist = Geolocator.distanceBetween(
+      pos.latitude,
+      pos.longitude,
+      r.lat,
+      r.lng,
+    );
+    if (dist > 50) {
+      snack('ໄກຈຸດສົ່ງ ${dist.round()}m (ເກີນ 50m) — ບໍ່ສາມາດສຳເລັດ');
+      return;
+    }
+    final target = r.billNo.isEmpty
+        ? null
+        : _bills.where((b) => b.billNo == r.billNo).firstOrNull;
+    if (target == null) {
+      snack(
+        r.billNo.isEmpty
+            ? 'QR ບໍ່ມີເລກບິນ'
+            : 'ບໍ່ພົບບິນ ${r.billNo} ໃນຖ້ຽວນີ້',
+      );
+      return;
+    }
+    if (target.isFinished || !(target.canComplete || target.phase == 'pickup')) {
+      snack('ບິນ ${target.billNo} ສຳເລັດແລ້ວ ຫຼື ຍັງບໍ່ພ້ອມ');
+      return;
+    }
+    snack('✓ ${target.billNo} ໃກ້ຈຸດ ${dist.round()}m — ກຳລັງສຳເລັດ');
+    await _checkInBill(target);
   }
 
   Future<void> _editBill(DeliveryBill b) async {
@@ -863,9 +1081,7 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            wasQueued
-                ? 'ປິດງານໄວ້ — ຈະສົ່ງເມື່ອມີເນັດ'
-                : 'ປິດງານແລ້ວ',
+            wasQueued ? 'ປິດງານໄວ້ — ຈະສົ່ງເມື່ອມີເນັດ' : 'ປິດງານແລ້ວ',
           ),
           backgroundColor: wasQueued ? AppTheme.warning : null,
         ),
@@ -931,6 +1147,23 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
   Widget _buildScaffold(Color sc) {
     return Scaffold(
       backgroundColor: AppTheme.bgDark,
+      // Floating "Scan ສຳເລັດ": scan a delivery-point QR to find + complete the
+      // matching bill (within 50 m) without opening each bill. Shown while the
+      // trip is being delivered and there is still a deliverable bill.
+      floatingActionButton:
+          (!widget.readOnly &&
+              widget.controller.settings.qrScanVerifyEnabled &&
+              _job.jobStatus >= 1 &&
+              _job.jobStatus < 3 &&
+              _bills.any((b) => b.canComplete || b.phase == 'pickup'))
+          ? FloatingActionButton.extended(
+              onPressed: _busy ? null : _scanCompleteAnyBill,
+              backgroundColor: AppTheme.primary,
+              foregroundColor: Colors.white,
+              icon: const Icon(Icons.qr_code_scanner_rounded),
+              label: const Text('Scan ສຳເລັດ'),
+            )
+          : null,
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(56),
         child: AppBar(
@@ -1008,6 +1241,7 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
             )
           : Column(
               children: [
+                const GpsTrackingBanner(),
                 Expanded(
                   child: RefreshIndicator(
                     onRefresh: _loadData,
@@ -1018,6 +1252,12 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                       children: [
                         // ── Hero header (gradient with status color) ──
                         _HeroJobHeader(job: _job, color: sc, icon: _statusIcon),
+                        const SizedBox(height: 10),
+                        if (_lastLoadUsedCache) ...[
+                          _cacheBanner(),
+                          const SizedBox(height: 10),
+                        ],
+                        _tripTimelineCard(),
                         const SizedBox(height: 10),
 
                         // ── Progress Steps ──
@@ -1070,6 +1310,28 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                                 ),
                               ),
                             ),
+                            const Spacer(),
+                            // Route view — only useful once dispatching and with
+                            // ≥1 unfinished bill that has a coordinate.
+                            if (_job.jobStatus == 2 &&
+                                _bills.any(
+                                  (b) => !b.isFinished && _hasLocation(b),
+                                ))
+                              TextButton.icon(
+                                onPressed: _openRoute,
+                                icon: const Icon(Icons.route_rounded, size: 16),
+                                label: const Text(
+                                  'ເສັ້ນທາງ',
+                                  style: TextStyle(fontSize: 12),
+                                ),
+                                style: TextButton.styleFrom(
+                                  foregroundColor: AppTheme.primary,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                  ),
+                                  minimumSize: const Size(0, 32),
+                                ),
+                              ),
                           ],
                         ),
                         const SizedBox(height: 8),
@@ -1085,7 +1347,11 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                 ),
 
                 // ── Bottom Action ──
-                _buildBottom(),
+                if (!widget.readOnly)
+                  _buildBottom()
+                else if (_job.pendingApproval &&
+                    widget.controller.user?.canApproveJobs == true)
+                  _buildSupervisorApprovalBottom(),
               ],
             ),
     );
@@ -1102,6 +1368,187 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     ),
     child: child,
   );
+
+  String _cleanText(String value) {
+    final text = value.trim();
+    if (text.isEmpty || text == '-') return '';
+    return text;
+  }
+
+  String _formatCacheTime(DateTime? value) {
+    if (value == null) return 'ບໍ່ຮູ້ເວລາ';
+    final local = value.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(local.day)}/${two(local.month)}/${local.year} ${two(local.hour)}:${two(local.minute)}';
+  }
+
+  Widget _cacheBanner() {
+    final jobsAt = _formatCacheTime(_jobsCacheAt);
+    final billsAt = _formatCacheTime(_billsCacheAt);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.warning.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(AppTheme.radiusMd),
+        border: Border.all(color: AppTheme.warning.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.cloud_off_rounded,
+            color: AppTheme.warning,
+            size: 18,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'ກຳລັງສະແດງຂໍ້ມູນຈາກ cache',
+                  style: TextStyle(
+                    color: AppTheme.textBright,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'Jobs: $jobsAt · Bills: $billsAt',
+                  style: const TextStyle(
+                    color: AppTheme.textMuted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: _loading ? null : _loadData,
+            style: TextButton.styleFrom(
+              foregroundColor: AppTheme.warning,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(0, 30),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('ອັບເດດ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<({String label, String detail, String time, IconData icon, Color color})>
+  _timelineRows() {
+    final waiting = _bills.where((b) => b.phase == 'waiting').length;
+    final pickup = _bills.where((b) => b.phase == 'pickup').length;
+    final inprogress = _bills.where((b) => b.phase == 'inprogress').length;
+    final done = _bills.where((b) => b.phase == 'done').length;
+    final cancel = _bills.where((b) => b.phase == 'cancel').length;
+    final rows =
+        <
+          ({
+            String label,
+            String detail,
+            String time,
+            IconData icon,
+            Color color,
+          })
+        >[
+          (
+            label: _job.pendingApproval ? 'ລໍຖ້າອະນຸມັດ' : 'ຖ້ຽວຖືກອະນຸມັດ',
+            detail: '${_job.itemBill} ບິນ · ${_job.car}',
+            time: _cleanText(_job.dateLogistic).isNotEmpty
+                ? _cleanText(_job.dateLogistic)
+                : _cleanText(_job.docDate),
+            icon: _job.pendingApproval
+                ? Icons.pending_actions_rounded
+                : Icons.verified_user_rounded,
+            color: _job.pendingApproval ? AppTheme.warning : AppTheme.success,
+          ),
+        ];
+
+    if (_job.jobStatus >= 1) {
+      rows.add((
+        label: 'ຮັບຖ້ຽວແລ້ວ',
+        detail: _job.driver,
+        time: _cleanText(_job.receivedAt),
+        icon: Icons.inventory_2_rounded,
+        color: AppTheme.primary,
+      ));
+    }
+    if (_job.jobStatus >= 2) {
+      rows.add((
+        label: 'ເລີ່ມຈັດສົ່ງ',
+        detail: _cleanText(_job.milesStart).isNotEmpty
+            ? 'Mile ${_cleanText(_job.milesStart)}'
+            : 'ກຳລັງອອກສົ່ງ',
+        time: _cleanText(_job.dispatchStartedAt),
+        icon: Icons.local_shipping_rounded,
+        color: AppTheme.info,
+      ));
+    }
+
+    rows.add((
+      label: 'ສະຖານະບິນ',
+      detail:
+          'ລໍ $waiting · ເບີກ $pickup · ກຳລັງ $inprogress · ສຳເລັດ $done · ຍົກເລີກ $cancel',
+      time: '',
+      icon: Icons.receipt_long_rounded,
+      color: AppTheme.textMuted,
+    ));
+
+    if (_job.jobStatus >= 3) {
+      rows.add((
+        label: 'ປິດຖ້ຽວ',
+        detail: _cleanText(_job.milesEnd).isNotEmpty
+            ? 'Mile ${_cleanText(_job.milesEnd)}'
+            : _job.statusText,
+        time: '',
+        icon: Icons.flag_circle_rounded,
+        color: AppTheme.success,
+      ));
+    }
+    return rows;
+  }
+
+  Widget _tripTimelineCard() {
+    final rows = _timelineRows();
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.timeline_rounded, color: AppTheme.primary, size: 16),
+              SizedBox(width: 7),
+              Text(
+                'Timeline ຖ້ຽວ',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: AppTheme.textBright,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          for (final row in rows.indexed)
+            _TimelineRow(
+              label: row.$2.label,
+              detail: row.$2.detail,
+              time: row.$2.time,
+              icon: row.$2.icon,
+              color: row.$2.color,
+              isLast: row.$1 == rows.length - 1,
+            ),
+        ],
+      ),
+    );
+  }
 
   // ── Steps ──
   Widget _buildSteps() {
@@ -1182,6 +1629,109 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     );
   }
 
+  // Prominent "ຮັບຂອງ → ປາຍທາງ" strip inside each bill card. Replaces the old
+  // small grey "ຮັບ:" / "ສົ່ງ:" lines so the driver sees where to collect and
+  // where to deliver at a glance — the two facts they most need per bill.
+  Widget _routeStrip(DeliveryBill bill) {
+    final pickup = bill.pickupTransportName.trim();
+    final isCustomerPickup = bill.pickupTransportCode == '__CUSTOMER__';
+    // Fall back to the customer name when no explicit destination text — that's
+    // still "where it's going" for the driver.
+    final dest = bill.destination.trim().isNotEmpty
+        ? bill.destination.trim()
+        : bill.custName.trim();
+    if (pickup.isEmpty && dest.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.only(top: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+      decoration: BoxDecoration(
+        color: AppTheme.primary.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.primary.withValues(alpha: 0.20)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (pickup.isNotEmpty)
+            _routeEndpoint(
+              icon: isCustomerPickup
+                  ? Icons.home_rounded
+                  : Icons.warehouse_rounded,
+              label: 'ຮັບຂອງ',
+              value: pickup,
+              color: AppTheme.info,
+            ),
+          if (pickup.isNotEmpty && dest.isNotEmpty)
+            const Padding(
+              padding: EdgeInsets.only(left: 5, top: 1, bottom: 1),
+              child: Icon(
+                Icons.south_rounded,
+                size: 13,
+                color: AppTheme.textMuted,
+              ),
+            ),
+          if (dest.isNotEmpty)
+            _routeEndpoint(
+              icon: Icons.location_on_rounded,
+              label: 'ປາຍທາງ',
+              value: dest,
+              color: AppTheme.success,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _routeEndpoint({
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color color,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 19,
+          height: 19,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Icon(icon, size: 12, color: color),
+        ),
+        const SizedBox(width: 6),
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Text(
+            '$label: ',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              color: color,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Text(
+              value,
+              style: const TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.textBright,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildBillCard(DeliveryBill bill) {
     final isWaiting = _job.jobStatus == 0;
     final phase = isWaiting ? 'waiting' : bill.phase;
@@ -1192,13 +1742,20 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     final hasMap = _hasLocation(bill);
     final blockedByActive = _hasOtherActiveCheckin(bill);
     final hasPhone = _hasPhone(bill);
-    final hasActions =
-        hasMap ||
-        hasPhone ||
-        (bill.canPickup && _job.jobStatus == 1) ||
-        (_job.jobStatus >= 2 && bill.phase == 'pickup' && !bill.isFinished) ||
-        bill.canComplete ||
-        bill.canCancel;
+    final isCustomerPickupBill = bill.pickupTransportCode == '__CUSTOMER__';
+    final hasContactActions = hasMap || hasPhone;
+    final hasWorkflowActions =
+        !widget.readOnly &&
+        ((bill.canPickup && _job.jobStatus == 1) ||
+            // Customer-pickup "ຮັບສິນຄ້າ" entry point — available whenever the bill
+            // is still waiting and the trip is open (driver collects en route).
+            (bill.canPickup && _job.jobStatus < 3 && isCustomerPickupBill) ||
+            (_job.jobStatus >= 2 &&
+                bill.phase == 'pickup' &&
+                !bill.isFinished) ||
+            bill.canComplete ||
+            bill.canCancel);
+    final hasActions = hasContactActions || hasWorkflowActions;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 5),
@@ -1252,7 +1809,10 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                                 _ParentBillChip(
                                   parentBillNo: bill.parentBillNo,
                                   siblingCount: _bills
-                                      .where((x) => x.parentBillNo == bill.parentBillNo)
+                                      .where(
+                                        (x) =>
+                                            x.parentBillNo == bill.parentBillNo,
+                                      )
                                       .length,
                                 ),
                               ],
@@ -1268,54 +1828,9 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          if (bill.pickupTransportName.isNotEmpty) ...[
-                            const SizedBox(height: 2),
-                            Row(
-                              children: [
-                                const Icon(
-                                  Icons.warehouse_outlined,
-                                  size: 10,
-                                  color: AppTheme.textMuted,
-                                ),
-                                const SizedBox(width: 2),
-                                Expanded(
-                                  child: Text(
-                                    'ຮັບ: ${bill.pickupTransportName}',
-                                    style: const TextStyle(
-                                      fontSize: 10,
-                                      color: AppTheme.textMuted,
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                          if (bill.destination.isNotEmpty) ...[
-                            const SizedBox(height: 2),
-                            Row(
-                              children: [
-                                const Icon(
-                                  Icons.location_on_outlined,
-                                  size: 10,
-                                  color: AppTheme.textMuted,
-                                ),
-                                const SizedBox(width: 2),
-                                Expanded(
-                                  child: Text(
-                                    'ສົ່ງ: ${bill.destination}',
-                                    style: const TextStyle(
-                                      fontSize: 10,
-                                      color: AppTheme.textMuted,
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
+                          // Prominent ຮັບຂອງ → ປາຍທາງ strip (replaces the old
+                          // small grey "ຮັບ:" / "ສົ່ງ:" lines).
+                          _routeStrip(bill),
                           // Delivery type pill: forwardTransportCode empty
                           // means delivered to the customer; otherwise the
                           // bill is being forwarded to a sister branch.
@@ -1324,6 +1839,47 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                             forwardCode: bill.forwardTransportCode,
                             forwardName: bill.forwardTransportName,
                           ),
+                          // Proof-of-pickup captured at the customer's yard —
+                          // tap to re-view the photo + signature.
+                          if (bill.hasReciptImg || bill.hasReciptSignImg) ...[
+                            const SizedBox(height: 4),
+                            GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => _viewPickupProof(bill),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.inventory_2_rounded,
+                                    size: 11,
+                                    color: AppTheme.success,
+                                  ),
+                                  const SizedBox(width: 3),
+                                  Flexible(
+                                    child: Text(
+                                      bill.hasReciptImg && bill.hasReciptSignImg
+                                          ? 'ຮັບເຄື່ອງຈາກລານ: ຮູບ + ລາຍເຊັນ'
+                                          : bill.hasReciptImg
+                                          ? 'ຮັບເຄື່ອງຈາກລານ: ຮູບ'
+                                          : 'ຮັບເຄື່ອງຈາກລານ: ລາຍເຊັນ',
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        color: AppTheme.success,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  const Icon(
+                                    Icons.visibility_rounded,
+                                    size: 12,
+                                    color: AppTheme.success,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -1482,23 +2038,40 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                         ),
                     ];
                     final workflow = <Widget>[
-                      // Pickup is allowed any time before the trip closes —
-                      // pickup_bill auto-receives the trip when jobStatus=0,
-                      // and a single trip may pick up at a second warehouse
-                      // after start_dispatch too. Customer-pickup bills don't
-                      // surface this button: their recipt_job is backfilled
-                      // automatically when the driver checks in at the
-                      // customer (see mobile.js:checkin_bill).
-                      if (bill.canPickup &&
+                      // Warehouse pickup — a plain tap (no photo). Allowed any
+                      // time before the trip closes: pickup_bill auto-receives
+                      // the trip when jobStatus=0, and a single trip may pick up
+                      // at a second warehouse after start_dispatch too. Hidden
+                      // for customer-pickup bills, which use the dedicated
+                      // "ຮັບສິນຄ້າ" button below instead.
+                      if (!widget.readOnly &&
+                          bill.canPickup &&
                           _job.jobStatus < 3 &&
-                          bill.pickupTransportCode != '__CUSTOMER__')
+                          !isCustomerPickupBill)
                         _actBtn(
                           'ເບີກ',
                           Icons.inventory_2_rounded,
                           AppTheme.info,
                           _busy ? null : () => _pickupBill(bill),
                         ),
-                      if (_job.jobStatus >= 1 &&
+                      // Customer pickup — driver goes to the customer's yard to
+                      // collect goods. Needs proof (GPS check-in + photo +
+                      // customer signature), unlike the plain warehouse tap, so
+                      // it routes through _receiveFromCustomer. After this the
+                      // bill is in "pickup" phase and the Check in / ສຳເລັດ
+                      // buttons below take over for the delivery leg.
+                      if (!widget.readOnly &&
+                          bill.canPickup &&
+                          _job.jobStatus < 3 &&
+                          isCustomerPickupBill)
+                        _actBtn(
+                          'ຮັບສິນຄ້າ (ລານລູກຄ້າ)',
+                          Icons.home_work_rounded,
+                          AppTheme.warning,
+                          _busy ? null : () => _receiveFromCustomer(bill),
+                        ),
+                      if (!widget.readOnly &&
+                          _job.jobStatus >= 1 &&
                           _job.jobStatus < 3 &&
                           bill.phase == 'pickup' &&
                           !bill.isFinished)
@@ -1507,49 +2080,30 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                               ? 'ສຳເລັດ ຫຼື ຍົກເລີກບິນທີ່ checkin ແລ້ວກ່ອນ'
                               : '',
                           child: _actBtn(
-                            'Check in',
-                            Icons.location_on_rounded,
-                            AppTheme.info,
+                            'ສຳເລັດ',
+                            Icons.check_circle_rounded,
+                            AppTheme.success,
                             _busy || blockedByActive
                                 ? null
                                 : () => _checkInBill(bill),
                           ),
                         ),
-                      // QR verify: driver scans the printed bill QR to confirm
-                      // they're at the right delivery point. Visible whenever
-                      // the bill is still in the active delivery window —
-                      // useful right before check-in and again before
-                      // completing if the driver wants to double-check. Gated
-                      // by the server feature flag so admins can disable it
-                      // app-wide from /manage/settings.
-                      if (widget.controller.settings.qrScanVerifyEnabled &&
-                          _job.jobStatus >= 1 &&
-                          _job.jobStatus < 3 &&
-                          (bill.phase == 'pickup' || bill.phase == 'inprogress'))
-                        _actBtn(
-                          'Scan QR',
-                          Icons.qr_code_scanner_rounded,
-                          AppTheme.primary,
-                          _busy ? null : () => _scanBillQr(bill),
-                        ),
-                      if (bill.canComplete || bill.phase == 'pickup')
+                      // (QR scan moved to the floating "Scan ສຳເລັດ" button —
+                      // one scanner finds + completes the matching bill within
+                      // 50 m, instead of a per-bill scan button.)
+                      // Only shown once the bill is checked in (canComplete) —
+                      // e.g. to retry/finish a complete that was cancelled after
+                      // check-in. During the "pickup" phase the single "Check in"
+                      // button above already runs check-in → item-select → ສຳເລັດ
+                      // in one flow, so no separate ສຳເລັດ button is shown there.
+                      if (!widget.readOnly && bill.canComplete)
                         _actBtn(
                           'ສຳເລັດ',
                           Icons.check_circle_rounded,
                           AppTheme.success,
-                          _busy
-                              ? null
-                              : bill.canComplete
-                              ? () => _completeBill(bill)
-                              : () {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('ກະລຸນາ Check in ກ່ອນ'),
-                                    ),
-                                  );
-                                },
+                          _busy ? null : () => _completeBill(bill),
                         ),
-                      if (bill.canCancel)
+                      if (!widget.readOnly && bill.canCancel)
                         _actBtn(
                           'ຍົກເລີກ',
                           Icons.cancel_rounded,
@@ -1559,7 +2113,9 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                       // Edit a completed delivery in-place: change qty,
                       // photos, signature, remark without resetting status.
                       // GPS coordinates are preserved on the server.
-                      if (bill.canEdit && _job.jobStatus < 3)
+                      if (!widget.readOnly &&
+                          bill.canEdit &&
+                          _job.jobStatus < 3)
                         _actBtn(
                           'ແກ້ໄຂ',
                           Icons.edit_rounded,
@@ -1569,7 +2125,9 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
                       // Roll back a completed delivery so the driver can
                       // retake the photo + location. Blocked once the trip
                       // is closed (jobStatus >= 3).
-                      if (bill.canRevertComplete && _job.jobStatus < 3)
+                      if (!widget.readOnly &&
+                          bill.canRevertComplete &&
+                          _job.jobStatus < 3)
                         _actBtn(
                           'ຍົກເລີກສຳເລັດ',
                           Icons.undo_rounded,
@@ -1739,6 +2297,41 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSupervisorApprovalBottom() {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+        decoration: const BoxDecoration(
+          color: AppTheme.bgDark,
+          border: Border(top: BorderSide(color: AppTheme.surfaceBorder)),
+        ),
+        child: SizedBox(
+          width: double.infinity,
+          height: 48,
+          child: FilledButton.icon(
+            onPressed: _busy ? null : _approveAsSupervisor,
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.success),
+            icon: _busy
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.approval_rounded, size: 18),
+            label: Text(
+              _busy ? 'ກຳລັງອະນຸມັດ...' : 'ອະນຸມັດຖ້ຽວນີ້',
+              style: const TextStyle(fontWeight: FontWeight.w900),
+            ),
+          ),
         ),
       ),
     );
@@ -3420,6 +4013,29 @@ class _CloseJobSheetState extends State<_CloseJobSheet> {
   }
 }
 
+// Result of the cancel dialog: free-text comment + a standardized reason code
+// (Module D) and an optional reschedule date (deferred delivery).
+class _CancelResult {
+  final String comment;
+  final String? reasonCode;
+  final String? rescheduleDate; // YYYY-MM-DD
+  const _CancelResult({
+    required this.comment,
+    this.reasonCode,
+    this.rescheduleDate,
+  });
+}
+
+const List<({String code, String label})> _cancelReasons = [
+  (code: 'customer_away', label: 'ລູກຄ້າບໍ່ຢູ່ບ້ານ'),
+  (code: 'shop_closed', label: 'ຮ້ານປິດ'),
+  (code: 'truck_left', label: 'ລົດອອກກ່ອນ'),
+  (code: 'truck_full', label: 'ລົດເຕັມ'),
+  (code: 'too_late', label: 'ສົ່ງບໍ່ທັນ'),
+  (code: 'goods_issue', label: 'ເຄື່ອງມີບັນຫາ'),
+  (code: 'other', label: 'ອື່ນໆ'),
+];
+
 class _CancelDialog extends StatefulWidget {
   final String billNo;
   const _CancelDialog({required this.billNo});
@@ -3431,6 +4047,8 @@ class _CancelDialog extends StatefulWidget {
 class _CancelDialogState extends State<_CancelDialog> {
   final _commentCtrl = TextEditingController();
   String? _error;
+  String? _reason;
+  DateTime? _reschedule;
 
   @override
   void dispose() {
@@ -3438,13 +4056,40 @@ class _CancelDialogState extends State<_CancelDialog> {
     super.dispose();
   }
 
+  String _fmt(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  Future<void> _pickReschedule() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: now.add(const Duration(days: 1)),
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 60)),
+    );
+    if (picked != null) setState(() => _reschedule = picked);
+  }
+
   void _confirm() {
-    final text = _commentCtrl.text.trim();
-    if (text.isEmpty) {
-      setState(() => _error = 'ກະລຸນາໃສ່ໝາຍເຫດການຍົກເລີກ');
+    if (_reason == null) {
+      setState(() => _error = 'ກະລຸນາເລືອກສາເຫດການຍົກເລີກ');
       return;
     }
-    Navigator.pop(context, text);
+    final text = _commentCtrl.text.trim();
+    // Only "ອື່ນໆ" needs a typed explanation; the rest use the chip label.
+    if (_reason == 'other' && text.isEmpty) {
+      setState(() => _error = 'ກະລຸນາໃສ່ລາຍລະອຽດສຳລັບ "ອື່ນໆ"');
+      return;
+    }
+    final label = _cancelReasons.firstWhere((r) => r.code == _reason).label;
+    Navigator.pop(
+      context,
+      _CancelResult(
+        comment: text.isEmpty ? label : text,
+        reasonCode: _reason,
+        rescheduleDate: _reschedule == null ? null : _fmt(_reschedule!),
+      ),
+    );
   }
 
   @override
@@ -3465,48 +4110,119 @@ class _CancelDialogState extends State<_CancelDialog> {
           ),
         ],
       ),
-      content: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            'ຍົກເລີກບິນ ${widget.billNo}',
-            style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _commentCtrl,
-            autofocus: true,
-            minLines: 3,
-            maxLines: 5,
-            style: const TextStyle(color: AppTheme.textBright, fontSize: 13),
-            onChanged: (_) {
-              if (_error != null) setState(() => _error = null);
-            },
-            decoration: InputDecoration(
-              hintText: 'ໝາຍເຫດການຍົກເລີກ (ບັງຄັບ) *',
-              hintStyle: const TextStyle(
-                color: AppTheme.textMuted,
-                fontSize: 12,
-              ),
-              filled: true,
-              fillColor: AppTheme.bgSurface,
-              errorText: _error,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(AppTheme.radiusSm),
-                borderSide: const BorderSide(color: AppTheme.surfaceBorder),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(AppTheme.radiusSm),
-                borderSide: const BorderSide(color: AppTheme.surfaceBorder),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(AppTheme.radiusSm),
-                borderSide: const BorderSide(color: AppTheme.error, width: 1.5),
+      content: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'ຍົກເລີກບິນ ${widget.billNo}',
+              style: const TextStyle(
+                color: AppTheme.textSecondary,
+                fontSize: 13,
               ),
             ),
-          ),
-        ],
+            const SizedBox(height: 10),
+            const Text(
+              'ສາເຫດ',
+              style: TextStyle(
+                color: AppTheme.textBright,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final r in _cancelReasons)
+                  ChoiceChip(
+                    label: Text(r.label, style: const TextStyle(fontSize: 11)),
+                    selected: _reason == r.code,
+                    onSelected: (_) => setState(() => _reason = r.code),
+                    backgroundColor: AppTheme.bgSurface,
+                    selectedColor: AppTheme.error.withValues(alpha: 0.25),
+                    labelStyle: TextStyle(
+                      color: _reason == r.code
+                          ? AppTheme.textBright
+                          : AppTheme.textMuted,
+                    ),
+                    side: const BorderSide(color: AppTheme.surfaceBorder),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _commentCtrl,
+              minLines: 2,
+              maxLines: 5,
+              style: const TextStyle(color: AppTheme.textBright, fontSize: 13),
+              onChanged: (_) {
+                if (_error != null) setState(() => _error = null);
+              },
+              decoration: InputDecoration(
+                hintText: _reason == 'other'
+                    ? 'ລາຍລະອຽດ (ບັງຄັບ) *'
+                    : 'ໝາຍເຫດເພີ່ມເຕີມ (ບໍ່ບັງຄັບ)',
+                hintStyle: const TextStyle(
+                  color: AppTheme.textMuted,
+                  fontSize: 12,
+                ),
+                filled: true,
+                fillColor: AppTheme.bgSurface,
+                errorText: _error,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(AppTheme.radiusSm),
+                  borderSide: const BorderSide(color: AppTheme.surfaceBorder),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(AppTheme.radiusSm),
+                  borderSide: const BorderSide(color: AppTheme.surfaceBorder),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(AppTheme.radiusSm),
+                  borderSide: const BorderSide(
+                    color: AppTheme.error,
+                    width: 1.5,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Checkbox(
+                  value: _reschedule != null,
+                  activeColor: AppTheme.primary,
+                  onChanged: (v) {
+                    if (v == true) {
+                      _pickReschedule();
+                    } else {
+                      setState(() => _reschedule = null);
+                    }
+                  },
+                ),
+                const Text(
+                  'ນັດສົ່ງໃໝ່',
+                  style: TextStyle(color: AppTheme.textBright, fontSize: 12),
+                ),
+                const Spacer(),
+                if (_reschedule != null)
+                  TextButton(
+                    onPressed: _pickReschedule,
+                    child: Text(
+                      _fmt(_reschedule!),
+                      style: const TextStyle(
+                        color: AppTheme.primary,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
       ),
       actions: [
         TextButton(
@@ -3532,12 +4248,16 @@ class _CompResult {
   final String? sig;
   final String? comment;
   final bool isCancelled;
+  final double? collectedAmount; // COD (Module B)
+  final String? paymentMethod;
   const _CompResult({
     required this.items,
     required this.images,
     this.sig,
     this.comment,
     this.isCancelled = false,
+    this.collectedAmount,
+    this.paymentMethod,
   });
 }
 
@@ -3551,6 +4271,8 @@ class _CompPage extends StatefulWidget {
 
 class _CompPageState extends State<_CompPage> {
   final _commentC = TextEditingController();
+  final _codC = TextEditingController(); // COD collected amount (Module B)
+  String _payMethod = 'cash'; // cash | transfer
   late final SignatureController _sigC;
   final _picker = ImagePicker();
   bool _loading = true;
@@ -3561,6 +4283,8 @@ class _CompPageState extends State<_CompPage> {
   final List<String> _images = [];
   int _step = 0; // 0=items, 1=photo, 2=signature, 3=confirm
 
+  bool get _hasCod => widget.bill.codAmount > 0;
+
   @override
   void initState() {
     super.initState();
@@ -3569,12 +4293,21 @@ class _CompPageState extends State<_CompPage> {
       penColor: Colors.white,
       exportBackgroundColor: AppTheme.bgDark,
     );
+    // Prefill COD with the expected amount — driver usually collects in full.
+    if (_hasCod) {
+      _codC.text = widget.bill.codAmount.toStringAsFixed(
+        widget.bill.codAmount.truncateToDouble() == widget.bill.codAmount
+            ? 0
+            : 2,
+      );
+    }
     _load();
   }
 
   @override
   void dispose() {
     _commentC.dispose();
+    _codC.dispose();
     _sigC.dispose();
     super.dispose();
   }
@@ -3642,9 +4375,18 @@ class _CompPageState extends State<_CompPage> {
         sig: sig,
         comment: _commentC.text.trim(),
         isCancelled: isCancelled,
+        collectedAmount: _hasCod && !isCancelled
+            ? (double.tryParse(_codC.text.trim().replaceAll(',', '')) ?? 0)
+            : null,
+        paymentMethod: _hasCod && !isCancelled ? _payMethod : null,
       ),
     );
   }
+
+  // Thousands-separated integer kip, e.g. 1500000 → "1,500,000".
+  String _money(double v) => v
+      .toStringAsFixed(0)
+      .replaceAllMapped(RegExp(r'(\d)(?=(\d{3})+$)'), (m) => '${m[1]},');
 
   String _fq(double v) =>
       v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
@@ -4311,6 +5053,77 @@ class _CompPageState extends State<_CompPage> {
             ),
             const SizedBox(height: 24),
 
+            // ── COD / ເກັບເງິນ (Module B) ── shown only when the bill has a
+            // cash-on-delivery amount.
+            if (_hasCod) ...[
+              _label(
+                Icons.payments_rounded,
+                'ເກັບເງິນ (COD ${_money(widget.bill.codAmount)} ກີບ)',
+                AppTheme.success,
+                null,
+              ),
+              const SizedBox(height: 10),
+              Container(
+                decoration: BoxDecoration(
+                  color: AppTheme.bgCard,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: AppTheme.surfaceBorder),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                child: TextField(
+                  controller: _codC,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  style: const TextStyle(
+                    color: AppTheme.textBright,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  decoration: const InputDecoration(
+                    hintText: 'ຈຳນວນເງິນທີ່ເກັບໄດ້',
+                    hintStyle: TextStyle(
+                      color: AppTheme.textMuted,
+                      fontSize: 13,
+                    ),
+                    border: InputBorder.none,
+                    contentPadding: EdgeInsets.symmetric(vertical: 14),
+                    suffixText: 'ກີບ',
+                    suffixStyle: TextStyle(color: AppTheme.textMuted),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  for (final m in const [
+                    (code: 'cash', label: 'ເງິນສົດ'),
+                    (code: 'transfer', label: 'ໂອນ'),
+                  ])
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        label: Text(
+                          m.label,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        selected: _payMethod == m.code,
+                        onSelected: (_) => setState(() => _payMethod = m.code),
+                        backgroundColor: AppTheme.bgCard,
+                        selectedColor: AppTheme.success.withValues(alpha: 0.25),
+                        labelStyle: TextStyle(
+                          color: _payMethod == m.code
+                              ? AppTheme.textBright
+                              : AppTheme.textMuted,
+                        ),
+                        side: const BorderSide(color: AppTheme.surfaceBorder),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 24),
+            ],
+
             _label(Icons.notes_rounded, 'ໝາຍເຫດ', AppTheme.textMuted, null),
             const SizedBox(height: 10),
             Container(
@@ -4593,6 +5406,521 @@ class _CompPageState extends State<_CompPage> {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// _ReceivePickupPage — proof capture for "ຮັບສິນຄ້າຈາກລານລູກຄ້າ"
+// A photo of the goods + the customer's signature, both required. Returned
+// to _receiveFromCustomer which sends them with the receive GPS.
+// ════════════════════════════════════════════════════════════════════
+class _ReceivePickupResult {
+  final String photo; // data:image/...;base64,...
+  final String signature; // data:image/png;base64,...
+  const _ReceivePickupResult({required this.photo, required this.signature});
+}
+
+class _ReceivePickupPage extends StatefulWidget {
+  final DeliveryBill bill;
+  const _ReceivePickupPage({required this.bill});
+  @override
+  State<_ReceivePickupPage> createState() => _ReceivePickupPageState();
+}
+
+class _ReceivePickupPageState extends State<_ReceivePickupPage> {
+  final _picker = ImagePicker();
+  late final SignatureController _sigC;
+  String? _photo; // data URI of the captured goods photo
+  bool _submitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _sigC = SignatureController(
+      penStrokeWidth: 3,
+      penColor: Colors.white,
+      exportBackgroundColor: AppTheme.bgDark,
+    );
+  }
+
+  @override
+  void dispose() {
+    _sigC.dispose();
+    super.dispose();
+  }
+
+  Future<void> _capture() async {
+    final f = await _picker.pickImage(
+      source: ImageSource.camera,
+      imageQuality: 55,
+      maxWidth: 1280,
+      maxHeight: 1280,
+    );
+    if (f == null) return;
+    final b = await f.readAsBytes();
+    final ext = f.name.toLowerCase().endsWith('.png') ? 'png' : 'jpeg';
+    setState(() => _photo = 'data:image/$ext;base64,${base64Encode(b)}');
+  }
+
+  Future<void> _submit() async {
+    if (_submitting) return;
+    if (_photo == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('ກະລຸນາຖ່າຍຮູບສິນຄ້າກ່ອນ')));
+      return;
+    }
+    if (_sigC.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ກະລຸນາໃຫ້ລູກຄ້າເຊັນຮັບກ່ອນ')),
+      );
+      return;
+    }
+    setState(() => _submitting = true);
+    final sigBytes = await _sigC.toPngBytes();
+    if (sigBytes == null) {
+      setState(() => _submitting = false);
+      return;
+    }
+    final sig = 'data:image/png;base64,${base64Encode(sigBytes)}';
+    if (!mounted) return;
+    Navigator.pop(
+      context,
+      _ReceivePickupResult(photo: _photo!, signature: sig),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final topPad = MediaQuery.of(context).padding.top;
+    final canSubmit = _photo != null && !_submitting;
+    return Scaffold(
+      backgroundColor: AppTheme.bgDark,
+      body: Column(
+        children: [
+          // ── Top bar ──
+          Padding(
+            padding: EdgeInsets.fromLTRB(8, topPad + 4, 12, 0),
+            child: Row(
+              children: [
+                IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(
+                    Icons.close_rounded,
+                    size: 22,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'ຮັບສິນຄ້າຈາກລານລູກຄ້າ',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: AppTheme.textBright,
+                        ),
+                      ),
+                      Text(
+                        '${widget.bill.billNo} · ${widget.bill.custName}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppTheme.textMuted,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          // ── Content ──
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+              children: [
+                // Photo capture
+                _ReceiveLabel(
+                  icon: Icons.add_a_photo_rounded,
+                  text: 'ຮູບສິນຄ້າທີ່ຮັບ',
+                  color: AppTheme.warning,
+                ),
+                const SizedBox(height: 10),
+                GestureDetector(
+                  onTap: _submitting ? null : _capture,
+                  child: _photo == null
+                      ? Container(
+                          height: 170,
+                          decoration: BoxDecoration(
+                            color: AppTheme.warning.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: AppTheme.warning.withValues(alpha: 0.32),
+                            ),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                width: 58,
+                                height: 58,
+                                decoration: BoxDecoration(
+                                  color: AppTheme.warning.withValues(
+                                    alpha: 0.16,
+                                  ),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Icon(
+                                  Icons.add_a_photo_rounded,
+                                  size: 30,
+                                  color: AppTheme.warning,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              const Text(
+                                'ກົດເພື່ອເປີດກ້ອງ',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppTheme.textBright,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : ClipRRect(
+                          borderRadius: BorderRadius.circular(18),
+                          child: Stack(
+                            children: [
+                              Image.memory(
+                                base64Decode(_photo!.split(',').last),
+                                width: double.infinity,
+                                height: 220,
+                                fit: BoxFit.cover,
+                              ),
+                              Positioned(
+                                top: 8,
+                                right: 8,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.62),
+                                    borderRadius: BorderRadius.circular(999),
+                                  ),
+                                  child: const Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.refresh_rounded,
+                                        size: 14,
+                                        color: Colors.white,
+                                      ),
+                                      SizedBox(width: 4),
+                                      Text(
+                                        'ຖ່າຍໃໝ່',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                ),
+                const SizedBox(height: 24),
+
+                // Signature
+                _ReceiveLabel(
+                  icon: Icons.draw_rounded,
+                  text: 'ລາຍເຊັນລູກຄ້າ (ຜູ້ສົ່ງມອບ)',
+                  color: AppTheme.info,
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  height: 300,
+                  decoration: BoxDecoration(
+                    color: AppTheme.bgCard,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: AppTheme.surfaceBorder),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: Stack(
+                    children: [
+                      Signature(
+                        controller: _sigC,
+                        backgroundColor: AppTheme.bgCard,
+                      ),
+                      Positioned(
+                        top: 8,
+                        right: 8,
+                        child: GestureDetector(
+                          onTap: () => _sigC.clear(),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppTheme.bgDark,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: AppTheme.surfaceBorder),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.refresh_rounded,
+                                  size: 13,
+                                  color: AppTheme.textMuted,
+                                ),
+                                SizedBox(width: 4),
+                                Text(
+                                  'ລຶບ',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: AppTheme.textMuted,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // ── Bottom ──
+          Container(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              12,
+              20,
+              MediaQuery.of(context).padding.bottom + 12,
+            ),
+            decoration: const BoxDecoration(
+              color: AppTheme.bgDark,
+              border: Border(top: BorderSide(color: AppTheme.surfaceBorder)),
+            ),
+            child: SizedBox(
+              height: 52,
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: canSubmit ? _submit : null,
+                icon: _submitting
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.inventory_2_rounded, size: 18),
+                label: Text(
+                  _submitting ? 'ກຳລັງບັນທຶກ...' : 'ບັນທຶກການຮັບເຄື່ອງ',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                    height: 1,
+                  ),
+                ),
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppTheme.success,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: AppTheme.surfaceBorder,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReceiveLabel extends StatelessWidget {
+  const _ReceiveLabel({
+    required this.icon,
+    required this.text,
+    required this.color,
+  });
+  final IconData icon;
+  final String text;
+  final Color color;
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: 8),
+        Text(
+          text,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+            color: AppTheme.textBright,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// _PickupProofViewer — view the photo + signature captured at the
+// customer's yard ("ຮັບສິນຄ້າຈາກລານລູກຄ້າ"). Bytes are fetched on demand.
+// ════════════════════════════════════════════════════════════════════
+class _PickupProofViewer extends StatefulWidget {
+  final ApiClient api;
+  final DeliveryBill bill;
+  const _PickupProofViewer({required this.api, required this.bill});
+  @override
+  State<_PickupProofViewer> createState() => _PickupProofViewerState();
+}
+
+class _PickupProofViewerState extends State<_PickupProofViewer> {
+  bool _loading = true;
+  String? _error;
+  String _photo = '';
+  String _signature = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await widget.api.getPickupImages(billNo: widget.bill.billNo);
+      if (!mounted) return;
+      setState(() {
+        _photo = r.photo;
+        _signature = r.signature;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e is ApiException ? e.message : '$e';
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasPhoto = _photo.isNotEmpty;
+    final hasSig = _signature.isNotEmpty;
+    return Scaffold(
+      backgroundColor: AppTheme.bgDark,
+      appBar: AppBar(
+        backgroundColor: AppTheme.bgDark,
+        foregroundColor: AppTheme.textBright,
+        elevation: 0,
+        title: Text(
+          'ຫຼັກຖານຮັບເຄື່ອງ · ${widget.bill.billNo}',
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+        ),
+      ),
+      body: _loading
+          ? const Center(
+              child: CircularProgressIndicator(color: AppTheme.primary),
+            )
+          : _error != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'ໂຫຼດຮູບບໍ່ໄດ້: $_error',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: AppTheme.textMuted),
+                ),
+              ),
+            )
+          : (!hasPhoto && !hasSig)
+          ? const Center(
+              child: Text(
+                'ບໍ່ມີຮູບຮັບເຄື່ອງ',
+                style: TextStyle(color: AppTheme.textMuted),
+              ),
+            )
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                if (hasPhoto) ...[
+                  _label('ຮູບສິນຄ້າທີ່ຮັບ'),
+                  const SizedBox(height: 8),
+                  _zoomImage(_photo),
+                  const SizedBox(height: 22),
+                ],
+                if (hasSig) ...[
+                  _label('ລາຍເຊັນລູກຄ້າ'),
+                  const SizedBox(height: 8),
+                  _zoomImage(_signature),
+                ],
+              ],
+            ),
+    );
+  }
+
+  Widget _label(String t) => Text(
+    t,
+    style: const TextStyle(
+      color: AppTheme.textBright,
+      fontSize: 13,
+      fontWeight: FontWeight.w800,
+    ),
+  );
+
+  Widget _zoomImage(String dataUri) {
+    final raw = dataUri.contains(',') ? dataUri.split(',').last : dataUri;
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.surfaceBorder),
+      ),
+      child: InteractiveViewer(
+        maxScale: 5,
+        child: Image.memory(
+          base64Decode(raw),
+          width: double.infinity,
+          fit: BoxFit.contain,
+          errorBuilder: (_, _, _) => const Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+              'ຮູບເສຍຫາຍ',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: AppTheme.textMuted),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
 // _HeroJobHeader — gradient hero with status, doc no, miles
 // ════════════════════════════════════════════════════════════════════
 class _HeroJobHeader extends StatelessWidget {
@@ -4822,7 +6150,10 @@ class _ParentBillChip extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppTheme.warning.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: AppTheme.warning.withValues(alpha: 0.35), width: 0.6),
+        border: Border.all(
+          color: AppTheme.warning.withValues(alpha: 0.35),
+          width: 0.6,
+        ),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -4831,7 +6162,7 @@ class _ParentBillChip extends StatelessWidget {
           const SizedBox(width: 2),
           Text(
             siblingCount > 1
-                ? '$parentBillNo · ${siblingCount}ບິນ'
+                ? '$parentBillNo · $siblingCountບິນ'
                 : parentBillNo,
             style: const TextStyle(
               fontSize: 9,
@@ -4890,6 +6221,102 @@ class _DeliveryTypePill extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _TimelineRow extends StatelessWidget {
+  const _TimelineRow({
+    required this.label,
+    required this.detail,
+    required this.time,
+    required this.icon,
+    required this.color,
+    required this.isLast,
+  });
+
+  final String label;
+  final String detail;
+  final String time;
+  final IconData icon;
+  final Color color;
+  final bool isLast;
+
+  @override
+  Widget build(BuildContext context) {
+    final cleanTime = time.trim();
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Column(
+          children: [
+            Container(
+              width: 28,
+              height: 28,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.13),
+                shape: BoxShape.circle,
+                border: Border.all(color: color.withValues(alpha: 0.45)),
+              ),
+              child: Icon(icon, size: 14, color: color),
+            ),
+            if (!isLast)
+              Container(width: 2, height: 26, color: AppTheme.surfaceBorder),
+          ],
+        ),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Padding(
+            padding: EdgeInsets.only(bottom: isLast ? 0 : 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppTheme.textBright,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    if (cleanTime.isNotEmpty)
+                      Text(
+                        cleanTime,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppTheme.textMuted,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                  ],
+                ),
+                if (detail.trim().isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    detail,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppTheme.textMuted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -5053,7 +6480,10 @@ class _EditBillPageState extends State<_EditBillPage> {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
-                  child: Signature(controller: _sigC!, backgroundColor: AppTheme.bgDark),
+                  child: Signature(
+                    controller: _sigC!,
+                    backgroundColor: AppTheme.bgDark,
+                  ),
                 ),
               ),
               const SizedBox(height: 12),
@@ -5106,10 +6536,12 @@ class _EditBillPageState extends State<_EditBillPage> {
     if (_submitting) return;
     setState(() => _submitting = true);
     final items = _items
-        .map((i) => {
-              'item_code': i.itemCode,
-              'qty': _qty[i.itemCode] ?? i.deliveredQty,
-            })
+        .map(
+          (i) => {
+            'item_code': i.itemCode,
+            'qty': _qty[i.itemCode] ?? i.deliveredQty,
+          },
+        )
         .toList();
     Navigator.pop(
       context,
@@ -5253,16 +6685,16 @@ class _EditBillPageState extends State<_EditBillPage> {
   }
 
   Widget _sectionTitle(String s) => Padding(
-        padding: const EdgeInsets.only(bottom: 8, top: 4),
-        child: Text(
-          s,
-          style: const TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w800,
-            color: AppTheme.textSecondary,
-          ),
-        ),
-      );
+    padding: const EdgeInsets.only(bottom: 8, top: 4),
+    child: Text(
+      s,
+      style: const TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w800,
+        color: AppTheme.textSecondary,
+      ),
+    ),
+  );
 
   Widget _itemRow(DeliveryItem item) {
     final qty = _qty[item.itemCode] ?? item.deliveredQty;
@@ -5314,8 +6746,7 @@ class _EditBillPageState extends State<_EditBillPage> {
                     GestureDetector(
                       onTap: isEmpty
                           ? null
-                          : () => setState(
-                              () => _qty[item.itemCode] = qty - 1),
+                          : () => setState(() => _qty[item.itemCode] = qty - 1),
                       child: Container(
                         width: 36,
                         height: 36,
@@ -5323,9 +6754,7 @@ class _EditBillPageState extends State<_EditBillPage> {
                         child: Icon(
                           Icons.remove_rounded,
                           size: 18,
-                          color: isEmpty
-                              ? AppTheme.textMuted
-                              : AppTheme.error,
+                          color: isEmpty ? AppTheme.textMuted : AppTheme.error,
                         ),
                       ),
                     ),
@@ -5345,8 +6774,7 @@ class _EditBillPageState extends State<_EditBillPage> {
                     GestureDetector(
                       onTap: isFull
                           ? null
-                          : () => setState(
-                              () => _qty[item.itemCode] = qty + 1),
+                          : () => setState(() => _qty[item.itemCode] = qty + 1),
                       child: Container(
                         width: 36,
                         height: 36,
@@ -5354,9 +6782,7 @@ class _EditBillPageState extends State<_EditBillPage> {
                         child: Icon(
                           Icons.add_rounded,
                           size: 18,
-                          color: isFull
-                              ? AppTheme.textMuted
-                              : AppTheme.primary,
+                          color: isFull ? AppTheme.textMuted : AppTheme.primary,
                         ),
                       ),
                     ),
@@ -5415,8 +6841,11 @@ class _EditBillPageState extends State<_EditBillPage> {
         children: [
           Row(
             children: [
-              const Icon(Icons.warning_rounded,
-                  size: 14, color: AppTheme.warning),
+              const Icon(
+                Icons.warning_rounded,
+                size: 14,
+                color: AppTheme.warning,
+              ),
               const SizedBox(width: 6),
               const Expanded(
                 child: Text(
@@ -5430,8 +6859,10 @@ class _EditBillPageState extends State<_EditBillPage> {
               ),
               TextButton(
                 onPressed: () => setState(() => _newImages = null),
-                child: const Text('ກັບໃຊ້ຮູບເກົ່າ',
-                    style: TextStyle(fontSize: 11)),
+                child: const Text(
+                  'ກັບໃຊ້ຮູບເກົ່າ',
+                  style: TextStyle(fontSize: 11),
+                ),
               ),
             ],
           ),

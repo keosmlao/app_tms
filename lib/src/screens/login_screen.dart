@@ -6,7 +6,8 @@ import '../core/app_theme.dart';
 import '../services/api_client.dart';
 
 // ════════════════════════════════════════════════════════════════════
-// LoginScreen — clean modern bottom-sheet style
+// LoginScreen — clean, light, modern. Centered logo + brand over a white
+// form card. Matches the app's light/premium theme.
 // ════════════════════════════════════════════════════════════════════
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key, required this.controller});
@@ -17,8 +18,7 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen>
-    with SingleTickerProviderStateMixin {
+class _LoginScreenState extends State<LoginScreen> {
   late final TextEditingController _baseUrlCtrl;
   final _userCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
@@ -28,21 +28,14 @@ class _LoginScreenState extends State<LoginScreen>
   bool _obscurePassword = true;
   bool _rememberMe = true;
 
-  late final AnimationController _entryCtrl;
-
   @override
   void initState() {
     super.initState();
     _baseUrlCtrl = TextEditingController(text: widget.controller.baseUrl);
-    _entryCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 700),
-    )..forward();
   }
 
   @override
   void dispose() {
-    _entryCtrl.dispose();
     _baseUrlCtrl.dispose();
     _userCtrl.dispose();
     _passCtrl.dispose();
@@ -71,11 +64,7 @@ class _LoginScreenState extends State<LoginScreen>
         SnackBar(
           content: Row(
             children: [
-              const Icon(
-                Icons.error_outline_rounded,
-                color: Colors.white,
-                size: 18,
-              ),
+              const Icon(Icons.error_outline_rounded, color: Colors.white, size: 18),
               const SizedBox(width: 8),
               Expanded(child: Text(msg)),
             ],
@@ -83,9 +72,7 @@ class _LoginScreenState extends State<LoginScreen>
           backgroundColor: AppTheme.error,
           behavior: SnackBarBehavior.floating,
           margin: const EdgeInsets.all(16),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
       );
     } finally {
@@ -105,150 +92,69 @@ class _LoginScreenState extends State<LoginScreen>
     }
   }
 
-  // ────────────────────────────── build ──────────────────────────────
   @override
   Widget build(BuildContext context) {
-    final viewInsets = MediaQuery.of(context).viewInsets.bottom;
-    final keyboardOpen = viewInsets > 0;
-    final size = MediaQuery.of(context).size;
-
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: SystemUiOverlayStyle.light,
+      value: SystemUiOverlayStyle.dark,
       child: Scaffold(
         backgroundColor: AppTheme.bgDark,
         resizeToAvoidBottomInset: true,
         body: Stack(
           children: [
-            // Background gradient + decorative blobs
-            const Positioned.fill(child: _Backdrop()),
-
-            // Hero (logo + brand) — anchored to top, fades when keyboard opens
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: AnimatedSlide(
-                duration: const Duration(milliseconds: 280),
-                curve: Curves.easeOut,
-                offset: keyboardOpen ? const Offset(0, -0.2) : Offset.zero,
-                child: AnimatedOpacity(
-                  duration: const Duration(milliseconds: 220),
-                  opacity: keyboardOpen ? 0.5 : 1,
-                  child: SafeArea(
-                    bottom: false,
-                    child: SizedBox(
-                      height: size.height * 0.42,
-                      child: _buildHero(),
-                    ),
-                  ),
+            // Soft warm wash at the top.
+            Container(
+              height: 320,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    AppTheme.primary.withValues(alpha: 0.10),
+                    AppTheme.bgDark,
+                  ],
                 ),
               ),
             ),
-
-            // Form sheet — anchored to bottom
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: SingleChildScrollView(
-                physics: const ClampingScrollPhysics(),
-                padding: EdgeInsets.only(bottom: viewInsets),
-                child: SlideTransition(
-                  position:
-                      Tween<Offset>(
-                        begin: const Offset(0, 0.3),
-                        end: Offset.zero,
-                      ).animate(
-                        CurvedAnimation(
-                          parent: _entryCtrl,
-                          curve: const Interval(
-                            0.25,
-                            1,
-                            curve: Curves.easeOutCubic,
+            SafeArea(
+              child: Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _logo(),
+                      const SizedBox(height: 20),
+                      ShaderMask(
+                        shaderCallback: (b) => const LinearGradient(
+                          colors: [
+                            AppTheme.brandOrange,
+                            AppTheme.brandOrangeLight,
+                          ],
+                        ).createShader(b),
+                        child: const Text(
+                          'ODG TMS',
+                          style: TextStyle(
+                            fontSize: 30,
+                            fontWeight: FontWeight.w900,
+                            color: Colors.white,
+                            letterSpacing: 2.5,
                           ),
                         ),
                       ),
-                  child: FadeTransition(
-                    opacity: CurvedAnimation(
-                      parent: _entryCtrl,
-                      curve: const Interval(0.25, 1, curve: Curves.easeOut),
-                    ),
-                    child: _buildFormSheet(),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ────────────────────────────── Hero ──────────────────────────────
-  Widget _buildHero() {
-    return FadeTransition(
-      opacity: CurvedAnimation(
-        parent: _entryCtrl,
-        curve: const Interval(0, 0.6, curve: Curves.easeOut),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 36, 24, 0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // Logo with halo
-            Container(
-              width: 96,
-              height: 96,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(AppTheme.radiusXl),
-                boxShadow: [
-                  BoxShadow(
-                    color: AppTheme.brandOrange.withValues(alpha: 0.5),
-                    blurRadius: 38,
-                    spreadRadius: 2,
-                  ),
-                ],
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(AppTheme.radiusXl),
-                child: Image.asset(
-                  'assets/odg.png',
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => Container(
-                    color: AppTheme.brandNavyMid,
-                    child: const Center(
-                      child: Icon(
-                        Icons.local_shipping_rounded,
-                        color: AppTheme.brandOrange,
-                        size: 44,
+                      const SizedBox(height: 6),
+                      const Text(
+                        'ລະບົບບໍລິຫານ ແລະ ປະຕິບັດການຂົນສົ່ງ',
+                        style: TextStyle(
+                          color: AppTheme.textMuted,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
+                      const SizedBox(height: 26),
+                      _formCard(),
+                    ],
                   ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 22),
-            ShaderMask(
-              shaderCallback: (b) => const LinearGradient(
-                colors: [AppTheme.brandOrange, AppTheme.brandOrangeLight],
-              ).createShader(b),
-              child: const Text(
-                'ODG TMS',
-                style: TextStyle(
-                  fontSize: 32,
-                  fontWeight: FontWeight.w900,
-                  color: Colors.white,
-                  letterSpacing: 3,
-                ),
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'ລະບົບຈັດສົ່ງສິນຄ້າ ສຳລັບຄົນຂັບ',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.72),
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.4,
               ),
             ),
           ],
@@ -257,183 +163,34 @@ class _LoginScreenState extends State<LoginScreen>
     );
   }
 
-  // ────────────────────────────── Form sheet ──────────────────────────────
-  Widget _buildFormSheet() {
+  Widget _logo() {
     return Container(
+      width: 90,
+      height: 90,
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [AppTheme.brandNavy, AppTheme.brandNavyDeep],
-        ),
-        borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(AppTheme.radiusXxl),
-        ),
-        border: Border(
-          top: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
-        ),
+        borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.4),
-            blurRadius: 32,
-            offset: const Offset(0, -10),
+            color: AppTheme.primary.withValues(alpha: 0.28),
+            blurRadius: 26,
+            spreadRadius: 1,
+            offset: const Offset(0, 8),
           ),
         ],
       ),
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 16, 24, 22),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Drag handle
-                Center(
-                  child: Container(
-                    width: 44,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.18),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 18),
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'ເຂົ້າສູ່ລະບົບ',
-                        style: TextStyle(
-                          color: AppTheme.textBright,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                    ),
-                    _ServerChip(onTap: _submitting ? null : _editServer),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'ກະລຸນາໃສ່ຊື່ຜູ້ໃຊ້ ແລະ ລະຫັດຜ່ານ',
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.65),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 20),
-
-                _label('ຊື່ຜູ້ໃຊ້'),
-                const SizedBox(height: 6),
-                TextFormField(
-                  controller: _userCtrl,
-                  enabled: !_submitting,
-                  textInputAction: TextInputAction.next,
-                  style: const TextStyle(
-                    color: AppTheme.textBright,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
-                  decoration: _inputDeco(
-                    'driver001',
-                    Icons.person_outline_rounded,
-                  ),
-                  validator: (v) =>
-                      (v ?? '').trim().isEmpty ? 'ກະລຸນາໃສ່ username' : null,
-                ),
-                const SizedBox(height: 14),
-
-                _label('ລະຫັດຜ່ານ'),
-                const SizedBox(height: 6),
-                TextFormField(
-                  controller: _passCtrl,
-                  enabled: !_submitting,
-                  obscureText: _obscurePassword,
-                  textInputAction: TextInputAction.done,
-                  onFieldSubmitted: (_) => _submit(),
-                  style: const TextStyle(
-                    color: AppTheme.textBright,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.5,
-                  ),
-                  decoration: _inputDeco('••••••••', Icons.lock_outline_rounded)
-                      .copyWith(
-                        suffixIcon: IconButton(
-                          onPressed: () => setState(
-                            () => _obscurePassword = !_obscurePassword,
-                          ),
-                          icon: Icon(
-                            _obscurePassword
-                                ? Icons.visibility_off_outlined
-                                : Icons.visibility_outlined,
-                            size: 20,
-                            color: AppTheme.textMuted,
-                          ),
-                        ),
-                      ),
-                  validator: (v) =>
-                      (v ?? '').trim().isEmpty ? 'ກະລຸນາໃສ່ password' : null,
-                ),
-                const SizedBox(height: 14),
-
-                _RememberMeRow(
-                  remember: _rememberMe,
-                  onChanged: _submitting
-                      ? null
-                      : (v) => setState(() => _rememberMe = v),
-                ),
-                const SizedBox(height: 18),
-
-                SizedBox(
-                  width: double.infinity,
-                  height: 60,
-                  child: FilledButton(
-                    onPressed: _submitting ? null : _submit,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppTheme.primary,
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: AppTheme.primary.withValues(
-                        alpha: 0.5,
-                      ),
-                      elevation: _submitting ? 0 : 6,
-                      shadowColor: AppTheme.primary.withValues(alpha: 0.55),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                    ),
-                    child: _submitting
-                        ? const SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2.4,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text(
-                                'ເລີ່ມພາລະກິດ',
-                                style: TextStyle(
-                                  fontSize: 17,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 0.5,
-                                ),
-                              ),
-                              SizedBox(width: 8),
-                              Icon(Icons.arrow_forward_rounded, size: 22),
-                            ],
-                          ),
-                  ),
-                ),
-              ],
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(24),
+        child: Image.asset(
+          'assets/odg.png',
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => Container(
+            color: AppTheme.primary.withValues(alpha: 0.12),
+            child: const Center(
+              child: Icon(
+                Icons.local_shipping_rounded,
+                color: AppTheme.primary,
+                size: 42,
+              ),
             ),
           ),
         ),
@@ -441,137 +198,143 @@ class _LoginScreenState extends State<LoginScreen>
     );
   }
 
-  Widget _label(String text) => Text(
-    text,
-    style: TextStyle(
-      color: Colors.white.withValues(alpha: 0.85),
-      fontSize: 12,
-      fontWeight: FontWeight.w800,
-      letterSpacing: 0.3,
-    ),
-  );
-
-  InputDecoration _inputDeco(String hint, IconData icon) {
-    return InputDecoration(
-      hintText: hint,
-      prefixIcon: Padding(
-        padding: const EdgeInsets.only(left: 12, right: 8),
-        child: Icon(icon, size: 20, color: AppTheme.brandOrange),
+  Widget _formCard() {
+    return Container(
+      width: double.infinity,
+      constraints: const BoxConstraints(maxWidth: 440),
+      padding: const EdgeInsets.fromLTRB(22, 22, 22, 22),
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: AppTheme.surfaceBorder),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.06),
+            blurRadius: 28,
+            offset: const Offset(0, 12),
+          ),
+        ],
       ),
-      prefixIconConstraints: const BoxConstraints(minWidth: 40),
-      filled: true,
-      fillColor: AppTheme.bgDark.withValues(alpha: 0.55),
-      hintStyle: TextStyle(
-        color: Colors.white.withValues(alpha: 0.3),
-        fontWeight: FontWeight.w500,
-      ),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppTheme.brandOrange, width: 2),
-      ),
-      errorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppTheme.error, width: 1.5),
-      ),
-      focusedErrorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppTheme.error, width: 2),
-      ),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
-    );
-  }
-}
-
-InputDecoration _bottomSheetInputDeco(String hint, IconData icon) {
-  return InputDecoration(
-    hintText: hint,
-    prefixIcon: Padding(
-      padding: const EdgeInsets.only(left: 12, right: 8),
-      child: Icon(icon, size: 20, color: AppTheme.brandOrange),
-    ),
-    prefixIconConstraints: const BoxConstraints(minWidth: 40),
-    filled: true,
-    fillColor: AppTheme.bgDark.withValues(alpha: 0.55),
-    hintStyle: TextStyle(
-      color: Colors.white.withValues(alpha: 0.3),
-      fontWeight: FontWeight.w500,
-    ),
-    border: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
-      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-    ),
-    enabledBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
-      borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-    ),
-    focusedBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
-      borderSide: const BorderSide(color: AppTheme.brandOrange, width: 2),
-    ),
-    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
-  );
-}
-
-class _RememberMeRow extends StatelessWidget {
-  const _RememberMeRow({required this.remember, required this.onChanged});
-
-  final bool remember;
-  final ValueChanged<bool>? onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onChanged == null ? null : () => onChanged!(!remember),
-      borderRadius: BorderRadius.circular(10),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Row(
+      child: Form(
+        key: _formKey,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              width: 22,
-              height: 22,
-              decoration: BoxDecoration(
-                gradient: remember
-                    ? const LinearGradient(
-                        colors: [
-                          AppTheme.brandOrange,
-                          AppTheme.brandOrangeDeep,
-                        ],
-                      )
-                    : null,
-                color: remember ? null : Colors.transparent,
-                borderRadius: BorderRadius.circular(7),
-                border: Border.all(
-                  color: remember
-                      ? AppTheme.brandOrange
-                      : Colors.white.withValues(alpha: 0.3),
-                  width: 1.5,
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'ເຂົ້າສູ່ລະບົບ',
+                    style: TextStyle(
+                      color: AppTheme.textBright,
+                      fontSize: 21,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
                 ),
-              ),
-              child: remember
-                  ? const Icon(
-                      Icons.check_rounded,
-                      color: Colors.white,
-                      size: 14,
-                    )
-                  : null,
+                _serverChip(),
+              ],
             ),
-            const SizedBox(width: 10),
-            Text(
-              'ຈື່ຂ້ອຍໄວ້',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.85),
-                fontSize: 13,
+            const SizedBox(height: 4),
+            const Text(
+              'ກະລຸນາໃສ່ຊື່ຜູ້ໃຊ້ ແລະ ລະຫັດຜ່ານ',
+              style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+            ),
+            const SizedBox(height: 22),
+
+            _label('ຊື່ຜູ້ໃຊ້'),
+            const SizedBox(height: 6),
+            TextFormField(
+              controller: _userCtrl,
+              enabled: !_submitting,
+              textInputAction: TextInputAction.next,
+              style: const TextStyle(
+                color: AppTheme.textBright,
+                fontSize: 15,
                 fontWeight: FontWeight.w700,
+              ),
+              decoration: _inputDeco('ຊື່ຜູ້ໃຊ້', Icons.person_outline_rounded),
+              validator: (v) =>
+                  (v ?? '').trim().isEmpty ? 'ກະລຸນາໃສ່ username' : null,
+            ),
+            const SizedBox(height: 14),
+
+            _label('ລະຫັດຜ່ານ'),
+            const SizedBox(height: 6),
+            TextFormField(
+              controller: _passCtrl,
+              enabled: !_submitting,
+              obscureText: _obscurePassword,
+              textInputAction: TextInputAction.done,
+              onFieldSubmitted: (_) => _submit(),
+              style: const TextStyle(
+                color: AppTheme.textBright,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+              ),
+              decoration: _inputDeco('••••••••', Icons.lock_outline_rounded)
+                  .copyWith(
+                    suffixIcon: IconButton(
+                      onPressed: () => setState(
+                        () => _obscurePassword = !_obscurePassword,
+                      ),
+                      icon: Icon(
+                        _obscurePassword
+                            ? Icons.visibility_off_outlined
+                            : Icons.visibility_outlined,
+                        size: 20,
+                        color: AppTheme.textMuted,
+                      ),
+                    ),
+                  ),
+              validator: (v) =>
+                  (v ?? '').trim().isEmpty ? 'ກະລຸນາໃສ່ password' : null,
+            ),
+            const SizedBox(height: 12),
+
+            _rememberRow(),
+            const SizedBox(height: 20),
+
+            SizedBox(
+              width: double.infinity,
+              height: 56,
+              child: FilledButton(
+                onPressed: _submitting ? null : _submit,
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppTheme.primary,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: AppTheme.primary.withValues(alpha: 0.5),
+                  elevation: _submitting ? 0 : 4,
+                  shadowColor: AppTheme.primary.withValues(alpha: 0.5),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                ),
+                child: _submitting
+                    ? const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.4,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            'ເຂົ້າສູ່ລະບົບ',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          SizedBox(width: 8),
+                          Icon(Icons.arrow_forward_rounded, size: 21),
+                        ],
+                      ),
               ),
             ),
           ],
@@ -579,36 +342,25 @@ class _RememberMeRow extends StatelessWidget {
       ),
     );
   }
-}
 
-class _ServerChip extends StatelessWidget {
-  const _ServerChip({required this.onTap});
-
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _serverChip() {
     return Material(
-      color: AppTheme.bgDark.withValues(alpha: 0.5),
+      color: AppTheme.bgSurface,
       borderRadius: BorderRadius.circular(999),
       child: InkWell(
-        onTap: onTap,
+        onTap: _submitting ? null : _editServer,
         borderRadius: BorderRadius.circular(999),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
           child: Row(
             mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.dns_rounded,
-                size: 14,
-                color: Colors.white.withValues(alpha: 0.7),
-              ),
-              const SizedBox(width: 6),
+            children: const [
+              Icon(Icons.dns_rounded, size: 14, color: AppTheme.textMuted),
+              SizedBox(width: 6),
               Text(
                 'Server',
                 style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.85),
+                  color: AppTheme.textSecondary,
                   fontSize: 11,
                   fontWeight: FontWeight.w800,
                 ),
@@ -617,6 +369,82 @@ class _ServerChip extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _rememberRow() {
+    return InkWell(
+      onTap: _submitting ? null : () => setState(() => _rememberMe = !_rememberMe),
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              width: 22,
+              height: 22,
+              decoration: BoxDecoration(
+                color: _rememberMe ? AppTheme.primary : Colors.transparent,
+                borderRadius: BorderRadius.circular(7),
+                border: Border.all(
+                  color: _rememberMe ? AppTheme.primary : AppTheme.surfaceBorder,
+                  width: 1.6,
+                ),
+              ),
+              child: _rememberMe
+                  ? const Icon(Icons.check_rounded, color: Colors.white, size: 14)
+                  : null,
+            ),
+            const SizedBox(width: 10),
+            const Text(
+              'ຈົດຈຳການເຂົ້າສູ່ລະບົບ',
+              style: TextStyle(
+                color: AppTheme.textSecondary,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _label(String text) => Text(
+    text,
+    style: const TextStyle(
+      color: AppTheme.textSecondary,
+      fontSize: 12,
+      fontWeight: FontWeight.w800,
+      letterSpacing: 0.2,
+    ),
+  );
+
+  InputDecoration _inputDeco(String hint, IconData icon) {
+    OutlineInputBorder border(Color c, [double w = 1]) => OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: BorderSide(color: c, width: w),
+    );
+    return InputDecoration(
+      hintText: hint,
+      prefixIcon: Padding(
+        padding: const EdgeInsets.only(left: 12, right: 8),
+        child: Icon(icon, size: 20, color: AppTheme.primary),
+      ),
+      prefixIconConstraints: const BoxConstraints(minWidth: 40),
+      filled: true,
+      fillColor: AppTheme.bgSurface,
+      hintStyle: const TextStyle(
+        color: AppTheme.textDim,
+        fontWeight: FontWeight.w500,
+      ),
+      border: border(AppTheme.surfaceBorder),
+      enabledBorder: border(AppTheme.surfaceBorder),
+      focusedBorder: border(AppTheme.primary, 2),
+      errorBorder: border(AppTheme.error, 1.5),
+      focusedErrorBorder: border(AppTheme.error, 2),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
     );
   }
 }
@@ -647,14 +475,16 @@ class _ServerUrlSheetState extends State<_ServerUrlSheet> {
 
   @override
   Widget build(BuildContext context) {
+    OutlineInputBorder border(Color c, [double w = 1]) => OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: BorderSide(color: c, width: w),
+    );
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
         decoration: const BoxDecoration(
           color: AppTheme.bgCard,
-          borderRadius: BorderRadius.vertical(
-            top: Radius.circular(AppTheme.radiusXl),
-          ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
         ),
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
         child: Column(
@@ -664,14 +494,14 @@ class _ServerUrlSheetState extends State<_ServerUrlSheet> {
               width: 40,
               height: 4,
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.18),
+                color: AppTheme.surfaceBorder,
                 borderRadius: BorderRadius.circular(999),
               ),
             ),
             const SizedBox(height: 18),
             const Row(
               children: [
-                Icon(Icons.dns_rounded, color: AppTheme.brandOrange, size: 20),
+                Icon(Icons.dns_rounded, color: AppTheme.primary, size: 20),
                 SizedBox(width: 8),
                 Text(
                   'Server URL',
@@ -688,9 +518,19 @@ class _ServerUrlSheetState extends State<_ServerUrlSheet> {
               controller: _controller,
               autofocus: true,
               style: const TextStyle(color: AppTheme.textBright),
-              decoration: _bottomSheetInputDeco(
-                'http://10.0.2.2:4000',
-                Icons.link_rounded,
+              decoration: InputDecoration(
+                hintText: 'https://tms.odienmall.com',
+                hintStyle: const TextStyle(color: AppTheme.textDim),
+                prefixIcon: const Icon(Icons.link_rounded, color: AppTheme.primary),
+                filled: true,
+                fillColor: AppTheme.bgSurface,
+                border: border(AppTheme.surfaceBorder),
+                enabledBorder: border(AppTheme.surfaceBorder),
+                focusedBorder: border(AppTheme.primary, 2),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 16,
+                ),
               ),
             ),
             const SizedBox(height: 16),
@@ -698,8 +538,7 @@ class _ServerUrlSheetState extends State<_ServerUrlSheet> {
               width: double.infinity,
               height: 52,
               child: FilledButton(
-                onPressed: () =>
-                    Navigator.pop(context, _controller.text.trim()),
+                onPressed: () => Navigator.pop(context, _controller.text.trim()),
                 style: FilledButton.styleFrom(
                   backgroundColor: AppTheme.primary,
                   shape: RoundedRectangleBorder(
@@ -712,30 +551,6 @@ class _ServerUrlSheetState extends State<_ServerUrlSheet> {
                 ),
               ),
             ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════
-// Backdrop - quiet operational canvas
-// ════════════════════════════════════════════════════════════════════
-class _Backdrop extends StatelessWidget {
-  const _Backdrop();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            AppTheme.brandNavyDeep,
-            AppTheme.brandNavy,
-            AppTheme.brandNavyDeep,
           ],
         ),
       ),

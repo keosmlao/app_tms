@@ -5,15 +5,15 @@ abstract final class AppTheme {
   // ══════════════════════════════════════════════════════
   // BRAND - Teal operations palette, with amber reserved for signals.
   // ══════════════════════════════════════════════════════
-  static const Color brandNavyDeep = Color(0xFF081017);
-  static const Color brandNavy = Color(0xFF0B171F);
-  static const Color brandNavyMid = Color(0xFF10242B);
-  static const Color brandNavyLight = Color(0xFF16463F);
+  static const Color brandNavyDeep = Color(0xFFF8FAFC);  // Very light gray/slate
+  static const Color brandNavy = Color(0xFFF1F5F9);      // Light gray
+  static const Color brandNavyMid = Color(0xFFFFFFFF);   // Pure white
+  static const Color brandNavyLight = Color(0xFFE2E8F0); // Light slate border/accent
 
   static const Color brandOrange = Color(0xFF0E7C6B);
   static const Color brandOrangeDeep = Color(0xFF075F52);
-  static const Color brandOrangeLight = Color(0xFF2DD4BF);
-  static const Color signal = Color(0xFFD0892B);
+  static const Color brandOrangeLight = Color(0xFF0D9488);
+  static const Color signal = Color(0xFFD97706); // Darker amber for better legibility on white
 
   // Primary (CTA / focus) = Teal; amber is used for waiting and warning.
   static const Color primary = brandOrange;
@@ -23,33 +23,33 @@ abstract final class AppTheme {
   // ══════════════════════════════════════════════════════
   // SEMANTIC
   // ══════════════════════════════════════════════════════
-  static const Color success = Color(0xFF10B981);
+  static const Color success = Color(0xFF059669); // Slightly darker green for contrast
   static const Color warning = signal;
-  static const Color error = Color(0xFFEF4444);
+  static const Color error = Color(0xFFDC2626); // Slightly darker red
   static const Color info = Color(0xFF0284C7);
 
   // ══════════════════════════════════════════════════════
-  // DARK SURFACES (Navy canvas)
+  // LIGHT SURFACES (Slate canvas)
   // ══════════════════════════════════════════════════════
-  static const Color bgDark = brandNavyDeep;
-  static const Color bgMid = brandNavy;
-  static const Color bgCard = brandNavyMid;
-  static const Color bgElevated = Color(0xFF16333A);
-  static const Color bgSurface = Color(0xFF102027);
+  static const Color bgDark = brandNavyDeep;      // F8FAFC
+  static const Color bgMid = brandNavy;          // F1F5F9
+  static const Color bgCard = brandNavyMid;        // FFFFFF
+  static const Color bgElevated = Color(0xFFFFFFFF);
+  static const Color bgSurface = Color(0xFFECEFF1);
 
   // ══════════════════════════════════════════════════════
   // BORDERS
   // ══════════════════════════════════════════════════════
-  static const Color surfaceBorder = Color(0x14FFFFFF);
+  static const Color surfaceBorder = Color(0xFFE2E8F0); // Solid light gray border
 
   // ══════════════════════════════════════════════════════
-  // TEXT (on dark)
+  // TEXT (on light)
   // ══════════════════════════════════════════════════════
-  static const Color textBright = Color(0xFFFFFFFF);
-  static const Color textPrimary = Color(0xFFF1F5F9);
-  static const Color textSecondary = Color(0xFFCBD5E1);
-  static const Color textMuted = Color(0xFF94A3B8);
-  static const Color textDim = Color(0xFF64748B);
+  static const Color textBright = Color(0xFF0F172A);    // Dark slate for headings
+  static const Color textPrimary = Color(0xFF1E293B);   // Slate for body text
+  static const Color textSecondary = Color(0xFF475569); // Slate gray for captions
+  static const Color textMuted = Color(0xFF64748B);     // Cool gray
+  static const Color textDim = Color(0xFF94A3B8);       // Light gray
 
   // ══════════════════════════════════════════════════════
   // RADIUS
@@ -119,10 +119,10 @@ abstract final class AppTheme {
   static ThemeData get darkTheme {
     final base = ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
+      brightness: Brightness.light,
       colorScheme: ColorScheme.fromSeed(
         seedColor: primary,
-        brightness: Brightness.dark,
+        brightness: Brightness.light,
         primary: primary,
         secondary: signal,
         surface: bgDark,

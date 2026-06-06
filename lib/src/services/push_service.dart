@@ -39,6 +39,9 @@ class PushService {
   /// app to navigate to a job detail page (after auth if needed).
   void Function(String docNo)? onNotificationOpened;
 
+  /// Called when a chat (DM) notification is tapped, so the UI can open chat.
+  void Function()? onChatOpened;
+
   String? get token => _token;
 
   /// Call once from `main()` before `runApp`. Safe to call before Firebase is
@@ -146,6 +149,10 @@ class PushService {
   }
 
   void _handleNotificationTap(RemoteMessage message) {
+    if (message.data['type']?.toString() == 'dm') {
+      onChatOpened?.call();
+      return;
+    }
     final docNo = message.data['doc_no']?.toString();
     if (docNo == null || docNo.isEmpty) return;
     onNotificationOpened?.call(docNo);

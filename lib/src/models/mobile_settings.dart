@@ -1,6 +1,6 @@
-// Server-controlled feature flags for the driver app. The dashboard admin
-// toggles these via /manage/settings; the app fetches them at startup and
-// caches the result for offline runs.
+// Server-controlled feature flags + config for the driver app. The dashboard
+// admin toggles these via /manage/settings; the app fetches them at startup
+// and caches the result for offline runs.
 class MobileSettings {
   const MobileSettings({this.qrScanVerifyEnabled = true});
 
@@ -16,12 +16,13 @@ class MobileSettings {
       if (v is num) return v != 0;
       return fallback;
     }
+
     return MobileSettings(
       qrScanVerifyEnabled: readBool('qr_scan_verify_enabled'),
     );
   }
 
   Map<String, dynamic> toJson() => {
-        'qr_scan_verify_enabled': qrScanVerifyEnabled,
-      };
+    'qr_scan_verify_enabled': qrScanVerifyEnabled,
+  };
 }

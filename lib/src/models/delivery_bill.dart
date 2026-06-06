@@ -32,6 +32,13 @@ class DeliveryBill {
     required this.remainingQtyTotal,
     required this.phase,
     required this.statusText,
+    this.hasReciptImg = false,
+    this.hasReciptSignImg = false,
+    this.codAmount = 0,
+    this.collectedAmount,
+    this.paymentMethod = '',
+    this.cancelReasonCode = '',
+    this.rescheduleDate = '',
   });
 
   final String billNo;
@@ -71,6 +78,18 @@ class DeliveryBill {
   final double remainingQtyTotal;
   final String phase;
   final String statusText;
+  // True when the driver captured a pickup photo / customer signature at the
+  // customer's yard ('__CUSTOMER__' receive). The bytes are excluded from the
+  // list payload — these flags only signal "proof on file".
+  final bool hasReciptImg;
+  final bool hasReciptSignImg;
+  // COD (Module B): cod_amount = expected to collect; collectedAmount = taken.
+  final double codAmount;
+  final double? collectedAmount;
+  final String paymentMethod; // cash | transfer | none | ''
+  // Module D: standardized cancel reason + reschedule date (display string).
+  final String cancelReasonCode;
+  final String rescheduleDate;
 
   factory DeliveryBill.fromJson(Map<String, dynamic> json) {
     int parseInt(dynamic value) => int.tryParse('$value') ?? 0;
@@ -109,6 +128,17 @@ class DeliveryBill {
       remainingQtyTotal: parseDouble(json['remaining_qty_total']),
       phase: (json['phase'] ?? 'waiting').toString(),
       statusText: (json['status_text'] ?? '-').toString(),
+      hasReciptImg: json['has_recipt_img'] == true ||
+          json['has_recipt_img']?.toString() == 'true',
+      hasReciptSignImg: json['has_recipt_sign_img'] == true ||
+          json['has_recipt_sign_img']?.toString() == 'true',
+      codAmount: parseDouble(json['cod_amount']),
+      collectedAmount: json['collected_amount'] == null
+          ? null
+          : parseDouble(json['collected_amount']),
+      paymentMethod: (json['payment_method'] ?? '').toString(),
+      cancelReasonCode: (json['cancel_reason_code'] ?? '').toString(),
+      rescheduleDate: (json['reschedule_date'] ?? '').toString(),
     );
   }
 
@@ -154,6 +184,13 @@ class DeliveryBill {
       remainingQtyTotal: remainingQtyTotal,
       phase: phase ?? this.phase,
       statusText: statusText ?? this.statusText,
+      hasReciptImg: hasReciptImg,
+      hasReciptSignImg: hasReciptSignImg,
+      codAmount: codAmount,
+      collectedAmount: collectedAmount,
+      paymentMethod: paymentMethod,
+      cancelReasonCode: cancelReasonCode,
+      rescheduleDate: rescheduleDate,
     );
   }
 

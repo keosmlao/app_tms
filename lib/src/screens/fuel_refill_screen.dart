@@ -143,13 +143,22 @@ class _FuelRefillScreenState extends State<FuelRefillScreen> {
 
   Future<void> _pickPhoto({required ImageSource source}) async {
     try {
-      final f = await _picker.pickImage(source: source, imageQuality: 70);
+      // Resize on capture so the inline base64 payload stays small. A
+      // full-resolution photo (several MB) sent inside the fuel_refill request
+      // can blow past the reverse-proxy body limit (413) — which surfaces as a
+      // failed save, especially on weak signal. 1280px @ q60 → ~100-300KB.
+      final f = await _picker.pickImage(
+        source: source,
+        maxWidth: 1280,
+        maxHeight: 1280,
+        imageQuality: 60,
+      );
       if (f == null) return;
       final bytes = await f.readAsBytes();
-      final ext = f.name.toLowerCase().endsWith('.png') ? 'png' : 'jpeg';
+      // image_picker re-encodes to JPEG when resizing, so always tag jpeg.
       setState(() {
         _imageBytes = bytes;
-        _imageDataUri = 'data:image/$ext;base64,${base64Encode(bytes)}';
+        _imageDataUri = 'data:image/jpeg;base64,${base64Encode(bytes)}';
       });
     } catch (e) {
       if (!mounted) return;

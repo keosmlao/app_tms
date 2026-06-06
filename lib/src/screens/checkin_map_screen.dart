@@ -1,8 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -22,27 +22,13 @@ class CheckinMapScreen extends StatefulWidget {
 }
 
 class _CheckinMapScreenState extends State<CheckinMapScreen> {
-  final _mapCtrl = MapController();
+  final _mapController = MapController();
+  final _distance = const Distance();
   StreamSubscription<Position>? _posSub;
   Position? _current;
   String? _error;
   bool _confirming = false;
-
-  LatLng? get _customerPoint {
-    // Prefer the dispatcher's planned pin (set on the bills-pending dashboard)
-    // — it's verified by a human and won't drift like the customer's stored
-    // coordinates. Fall back to the bill's lat/lng otherwise.
-    final pLat = double.tryParse(widget.bill.plannedLat.trim());
-    final pLng = double.tryParse(widget.bill.plannedLng.trim());
-    if (pLat != null && pLng != null && !(pLat == 0 && pLng == 0)) {
-      return LatLng(pLat, pLng);
-    }
-    final lat = double.tryParse(widget.bill.lat.trim());
-    final lng = double.tryParse(widget.bill.lng.trim());
-    if (lat == null || lng == null) return null;
-    if (lat == 0 && lng == 0) return null;
-    return LatLng(lat, lng);
-  }
+  bool _mapReady = false;
 
   @override
   void initState() {
@@ -77,37 +63,44 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
         );
         if (mounted) {
           setState(() => _current = first);
-          _mapCtrl.move(LatLng(first.latitude, first.longitude), 17);
         }
       } catch (_) {
         // ignore; the stream below will provide the position when ready.
       }
 
-      _posSub = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.bestForNavigation,
-          distanceFilter: 2,
-        ),
-      ).listen((pos) {
-        if (!mounted) return;
-        setState(() => _current = pos);
-      });
+      _posSub =
+          Geolocator.getPositionStream(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.bestForNavigation,
+              distanceFilter: 2,
+            ),
+          ).listen((pos) {
+            if (!mounted) return;
+            final wasWaiting = _current == null;
+            setState(() => _current = pos);
+            if (wasWaiting) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _fitInitialMap();
+              });
+            }
+          });
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     }
   }
 
   void _recenter() {
-    if (_current == null) return;
+    final target = _currentPoint ?? _customerPoint;
+    if (!_mapReady || target == null) return;
     HapticFeedback.selectionClick();
-    _mapCtrl.move(LatLng(_current!.latitude, _current!.longitude), 18);
+    _mapController.move(target, _currentPoint != null ? 17 : 15);
   }
 
   Future<void> _confirm() async {
     if (_current == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('ຍັງບໍ່ໄດ້ຮັບສັນຍານ GPS')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('ຍັງບໍ່ໄດ້ຮັບສັນຍານ GPS')));
       return;
     }
     HapticFeedback.mediumImpact();
@@ -115,63 +108,143 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
     Navigator.pop(context, _current);
   }
 
+  LatLng? get _currentPoint {
+    final current = _current;
+    if (current == null) return null;
+    return LatLng(current.latitude, current.longitude);
+  }
+
+  LatLng? get _customerPoint {
+    final plannedLat = double.tryParse(widget.bill.plannedLat.trim());
+    final plannedLng = double.tryParse(widget.bill.plannedLng.trim());
+    if (_validPoint(plannedLat, plannedLng)) {
+      return LatLng(plannedLat!, plannedLng!);
+    }
+    final lat = double.tryParse(widget.bill.lat.trim());
+    final lng = double.tryParse(widget.bill.lng.trim());
+    if (_validPoint(lat, lng)) return LatLng(lat!, lng!);
+    return null;
+  }
+
+  bool _validPoint(double? lat, double? lng) {
+    if (lat == null || lng == null) return false;
+    if (lat == 0 && lng == 0) return false;
+    return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+  }
+
+  double? get _distanceMeters {
+    final current = _currentPoint;
+    final customer = _customerPoint;
+    if (current == null || customer == null) return null;
+    return _distance.as(LengthUnit.Meter, current, customer);
+  }
+
+  String _formatDistance(double meters) {
+    if (meters >= 1000) return '${(meters / 1000).toStringAsFixed(2)} km';
+    return '${meters.toStringAsFixed(0)} m';
+  }
+
+  Color _distanceColor(double? meters) {
+    if (meters == null) return AppTheme.textMuted;
+    if (meters <= 120) return AppTheme.success;
+    if (meters <= 500) return AppTheme.warning;
+    return AppTheme.error;
+  }
+
+  String get _customerLocationLabel {
+    final hasPlanned =
+        widget.bill.plannedLat.trim().isNotEmpty &&
+        widget.bill.plannedLng.trim().isNotEmpty;
+    if (hasPlanned) return 'ຈຸດທີ່ dispatcher ກຳນົດ';
+    if (_customerPoint != null) return 'ຈຸດລູກຄ້າຈາກລະບົບ';
+    return 'ບໍ່ມີພິກັດລູກຄ້າ';
+  }
+
+  void _fitInitialMap() {
+    if (!_mapReady) return;
+    final current = _currentPoint;
+    final customer = _customerPoint;
+    if (current != null && customer != null) {
+      _mapController.fitCamera(
+        CameraFit.bounds(
+          bounds: LatLngBounds.fromPoints([current, customer]),
+          padding: const EdgeInsets.fromLTRB(56, 150, 56, 260),
+          maxZoom: 17,
+        ),
+      );
+      return;
+    }
+    final single = current ?? customer;
+    if (single != null) _mapController.move(single, current != null ? 17 : 15);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final initialCenter = _current != null
-        ? LatLng(_current!.latitude, _current!.longitude)
-        : _customerPoint ?? const LatLng(17.967, 102.611); // Vientiane fallback
-
+    final current = _currentPoint;
+    final customer = _customerPoint;
+    final distanceMeters = _distanceMeters;
+    final initialCenter =
+        current ?? customer ?? const LatLng(17.9757, 102.6331);
     return Scaffold(
       backgroundColor: AppTheme.bgDark,
       body: Stack(
         children: [
           FlutterMap(
-            mapController: _mapCtrl,
+            mapController: _mapController,
             options: MapOptions(
               initialCenter: initialCenter,
-              initialZoom: 17,
+              initialZoom: current != null ? 17 : 15,
               minZoom: 4,
               maxZoom: 19,
+              onMapReady: () {
+                _mapReady = true;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) _fitInitialMap();
+                });
+              },
             ),
             children: [
               TileLayer(
-                urlTemplate:
-                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'com.odg.odgtms',
-                maxZoom: 19,
               ),
-              if (_customerPoint != null)
-                MarkerLayer(
-                  markers: [
-                    Marker(
-                      point: _customerPoint!,
-                      width: 44,
-                      height: 44,
-                      child: _PinIcon(
-                        color: AppTheme.warning,
-                        icon: Icons.store_rounded,
-                      ),
+              if (current != null && customer != null)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: [current, customer],
+                      strokeWidth: 4,
+                      color: _distanceColor(
+                        distanceMeters,
+                      ).withValues(alpha: 0.85),
                     ),
                   ],
                 ),
-              if (_current != null)
-                MarkerLayer(
-                  markers: [
+              MarkerLayer(
+                markers: [
+                  if (customer != null)
                     Marker(
-                      point: LatLng(
-                        _current!.latitude,
-                        _current!.longitude,
+                      point: customer,
+                      width: 52,
+                      height: 52,
+                      child: const _PinIcon(
+                        color: AppTheme.warning,
+                        icon: Icons.storefront_rounded,
                       ),
-                      width: 56,
-                      height: 56,
-                      child: _PinIcon(
+                    ),
+                  if (current != null)
+                    Marker(
+                      point: current,
+                      width: 54,
+                      height: 54,
+                      child: const _PinIcon(
                         color: AppTheme.primary,
-                        icon: Icons.my_location_rounded,
+                        icon: Icons.local_shipping_rounded,
                         glow: true,
                       ),
                     ),
-                  ],
-                ),
+                ],
+              ),
             ],
           ),
 
@@ -189,11 +262,12 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
                   Expanded(
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 10),
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
                       decoration: BoxDecoration(
                         color: AppTheme.bgCard.withValues(alpha: 0.92),
-                        borderRadius:
-                            BorderRadius.circular(AppTheme.radiusLg),
+                        borderRadius: BorderRadius.circular(AppTheme.radiusLg),
                         border: Border.all(color: AppTheme.surfaceBorder),
                       ),
                       child: Column(
@@ -210,7 +284,7 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
                           ),
                           const SizedBox(height: 1),
                           Text(
-                            widget.bill.custName,
+                            '${widget.bill.custName} · $_customerLocationLabel',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -250,8 +324,7 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
                       padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
                       decoration: BoxDecoration(
                         color: AppTheme.bgCard,
-                        borderRadius:
-                            BorderRadius.circular(AppTheme.radiusXl),
+                        borderRadius: BorderRadius.circular(AppTheme.radiusXl),
                         border: Border.all(color: AppTheme.surfaceBorder),
                         boxShadow: AppTheme.shadowMd,
                       ),
@@ -264,12 +337,13 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
                                 height: 36,
                                 decoration: BoxDecoration(
                                   color: _current != null
-                                      ? AppTheme.success
-                                          .withValues(alpha: 0.15)
-                                      : AppTheme.warning
-                                          .withValues(alpha: 0.15),
+                                      ? AppTheme.success.withValues(alpha: 0.15)
+                                      : AppTheme.warning.withValues(
+                                          alpha: 0.15,
+                                        ),
                                   borderRadius: BorderRadius.circular(
-                                      AppTheme.radiusMd),
+                                    AppTheme.radiusMd,
+                                  ),
                                 ),
                                 child: Icon(
                                   _current != null
@@ -284,8 +358,7 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Text(
@@ -302,7 +375,7 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
                                     Text(
                                       _current != null
                                           ? '${_current!.latitude.toStringAsFixed(6)}, ${_current!.longitude.toStringAsFixed(6)} · ±${_current!.accuracy.toStringAsFixed(0)} m'
-                                          : 'ກວດສິດ Location ໃນ Settings ຖ້າຍູ່ນານ',
+                                          : 'ກວດສິດ Location ໃນ Settings ຖ້າລໍຖ້ານານ',
                                       style: const TextStyle(
                                         color: AppTheme.textMuted,
                                         fontSize: 11,
@@ -314,6 +387,49 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
                               ),
                             ],
                           ),
+                          if (customer != null || distanceMeters != null) ...[
+                            const SizedBox(height: 12),
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 10,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppTheme.bgSurface,
+                                borderRadius: BorderRadius.circular(
+                                  AppTheme.radiusMd,
+                                ),
+                                border: Border.all(
+                                  color: AppTheme.surfaceBorder,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.route_rounded,
+                                    color: _distanceColor(distanceMeters),
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      distanceMeters != null
+                                          ? 'ຫ່າງຈາກຈຸດສົ່ງ ${_formatDistance(distanceMeters)}'
+                                          : _customerLocationLabel,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: _distanceColor(distanceMeters),
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                           const SizedBox(height: 12),
                           SizedBox(
                             width: double.infinity,
@@ -387,11 +503,7 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
 }
 
 class _PinIcon extends StatelessWidget {
-  const _PinIcon({
-    required this.color,
-    required this.icon,
-    this.glow = false,
-  });
+  const _PinIcon({required this.color, required this.icon, this.glow = false});
 
   final Color color;
   final IconData icon;

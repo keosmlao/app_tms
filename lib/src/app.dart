@@ -5,9 +5,12 @@ import 'core/app_config.dart';
 import 'core/app_theme.dart';
 import 'screens/home_shell.dart';
 import 'screens/login_screen.dart';
+import 'screens/supervisor_dashboard_screen.dart';
+import 'screens/update_required_screen.dart';
+import 'services/location_tracking_service.dart';
 
-class TmsDriverApp extends StatelessWidget {
-  const TmsDriverApp({super.key, required this.controller});
+class TmsApp extends StatelessWidget {
+  const TmsApp({super.key, required this.controller});
 
   final AppController controller;
   @override
@@ -15,15 +18,22 @@ class TmsDriverApp extends StatelessWidget {
     return MaterialApp(
       title: AppConfig.appName,
       debugShowCheckedModeBanner: false,
+      navigatorKey: LocationTrackingService.navigatorKey,
       theme: AppTheme.lightTheme,
       home: AnimatedBuilder(
         animation: controller,
         builder: (context, _) {
-          return !controller.isReady
-              ? const _SplashScreen()
-              : controller.isAuthenticated
-              ? HomeShell(controller: controller)
-              : LoginScreen(controller: controller);
+          if (!controller.isReady) return const _SplashScreen();
+          // A forced update blocks everything — authed or not.
+          if (controller.mustUpdate) {
+            return UpdateRequiredScreen(info: controller.appUpdate!);
+          }
+          if (!controller.isAuthenticated) {
+            return LoginScreen(controller: controller);
+          }
+          return controller.user?.isOperationsUser == true
+              ? SupervisorDashboardScreen(controller: controller)
+              : HomeShell(controller: controller);
         },
       ),
     );

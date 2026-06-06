@@ -6,10 +6,12 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/app_config.dart';
+import 'models/app_update_info.dart';
 import 'models/auth_user.dart';
 import 'models/mobile_settings.dart';
 import 'services/api_client.dart';
 import 'services/auth_storage.dart';
+import 'services/location_tracking_service.dart';
 import 'services/offline_outbox.dart';
 import 'services/push_service.dart';
 
@@ -25,6 +27,7 @@ class AppController extends ChangeNotifier {
   AuthUser? _user;
   String? _pendingDocNo;
   MobileSettings _settings = const MobileSettings();
+  AppUpdateInfo? _appUpdate;
 
   bool get isReady => _isReady;
   String get baseUrl => _baseUrl;
@@ -32,10 +35,25 @@ class AppController extends ChangeNotifier {
   bool get isAuthenticated => _user != null;
   String? get pendingDocNo => _pendingDocNo;
   MobileSettings get settings => _settings;
+  AppUpdateInfo? get appUpdate => _appUpdate;
+  // When true the whole app is blocked behind the update screen.
+  bool get mustUpdate => _appUpdate?.forceUpdate == true;
+
+  // Record the latest update policy from the backend (login/settings/426).
+  // Only escalates to a blocking state — a forced flag is never cleared by a
+  // later non-forced response within the same session.
+  void setAppUpdate(AppUpdateInfo info) {
+    if (_appUpdate?.forceUpdate == true && !info.forceUpdate) return;
+    _appUpdate = info;
+    notifyListeners();
+  }
 
   ApiClient get api => ApiClient(baseUrl: _baseUrl, authToken: _user?.token);
 
   Future<void> initialize() async {
+    // Any request that hits the version gate (426), plus the app_update block
+    // on login/settings, routes here so the UI can react from anywhere.
+    ApiClient.onAppUpdate = setAppUpdate;
     final session = await storage.readSession();
     if (session != null) {
       if (session.user.token.trim().isEmpty) {
@@ -139,6 +157,8 @@ class AppController extends ChangeNotifier {
     _user = null;
     _pendingDocNo = null;
     OfflineOutbox.instance.setAuthToken(null);
+    // Stop continuous GPS tracking + tear down its foreground service.
+    unawaited(LocationTrackingService.instance.stop());
     await storage.clear();
     _notifyAfterFrame();
   }

@@ -23,6 +23,7 @@ void main() {
       roles: 'driver',
       driverId: 'D1',
       token: 'tk',
+      isDriver: true,
     );
     await storage.saveSession(baseUrl: 'https://api.example/', user: user);
 
@@ -43,6 +44,7 @@ void main() {
       roles: '',
       driverId: 'D1',
       token: 'tk',
+      isDriver: true,
     );
     await storage.saveSession(baseUrl: 'http://x', user: user);
 

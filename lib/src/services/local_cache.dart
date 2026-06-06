@@ -34,6 +34,9 @@ class LocalCache {
     return _read(_billsKey(docNo));
   }
 
+  Future<DateTime?> billsSavedAt(String docNo) =>
+      _readSavedAt(_billsKey(docNo));
+
   // ────────────────────────── items ──────────────────────────
   Future<void> saveItems(String billNo, List<dynamic> rows) async {
     await _save(_itemsKey(billNo), rows);
@@ -42,6 +45,9 @@ class LocalCache {
   Future<List<Map<String, dynamic>>?> readItems(String billNo) async {
     return _read(_itemsKey(billNo));
   }
+
+  Future<DateTime?> itemsSavedAt(String billNo) =>
+      _readSavedAt(_itemsKey(billNo));
 
   // ────────────────────────── utility ──────────────────────────
   Future<DateTime?> jobsSavedAt(String driverId) =>
