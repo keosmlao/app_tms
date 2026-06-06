@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find \"D:\\\\Aproject\\\\tms\\\\src\\\\components\\\\forms\" -type f 2>/dev/null)",
+      "Read(//d/Aproject/tms/src/components/forms/**)"
+    ]
+  }
+}

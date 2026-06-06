@@ -14,6 +14,7 @@ import '../widgets/gps_tracking_banner.dart';
 import 'chat_people_screen.dart';
 import 'outbox_screen.dart';
 import 'fuel_refill_screen.dart';
+import 'inspection_list_screen.dart';
 import 'jobs_screen.dart';
 
 /// Driver home: a clean, focused, premium hub. One hero card for the current trip
@@ -239,6 +240,15 @@ class _HomeShellState extends State<HomeShell> {
     await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => FuelRefillScreen(controller: widget.controller),
+      ),
+    );
+  }
+
+  Future<void> _openInspection() async {
+    HapticFeedback.selectionClick();
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => InspectionListScreen(controller: widget.controller),
       ),
     );
   }
@@ -800,6 +810,13 @@ class _HomeShellState extends State<HomeShell> {
             sub: 'ບັນທຶກເຕີມ',
             color: AppTheme.warning,
             onTap: _openAddFuel,
+          ),
+          (
+            icon: Icons.fact_check_rounded,
+            label: 'ກວດສະພາບລົດ',
+            sub: 'ກວດ / ສົ່ງອານຸມັດ',
+            color: AppTheme.info,
+            onTap: _openInspection,
           ),
           (
             icon: Icons.refresh_rounded,
