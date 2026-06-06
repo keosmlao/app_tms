@@ -33,6 +33,7 @@ class _HomeShellState extends State<HomeShell> {
   List<DeliveryJob> _jobs = const [];
   bool _loadingJobs = true;
   int _chatUnread = 0;
+  int _pendingInspections = 0;
   Timer? _chatPoll;
   bool _onDuty = true;
 
@@ -86,10 +87,26 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  Future<void> _loadInspectionPending() async {
+    final user = widget.controller.user;
+    if (user == null) return;
+    try {
+      final records = await widget.controller.api.getInspections(
+        driverCode: user.code,
+        pendingOnly: true,
+      );
+      if (!mounted) return;
+      setState(() => _pendingInspections = records.length);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
   Future<void> _fetchAll() async {
     // Refresh feature flags alongside the home data — admin toggles in the
     // dashboard take effect on the next pull-to-refresh / app reopen.
     unawaited(widget.controller.loadSettings());
+    unawaited(_loadInspectionPending());
     await _fetchJobs();
   }
 
@@ -251,6 +268,7 @@ class _HomeShellState extends State<HomeShell> {
         builder: (_) => InspectionListScreen(controller: widget.controller),
       ),
     );
+    if (mounted) _loadInspectionPending();
   }
 
   // The trip to surface in the hero card: an active one first, else the next
@@ -788,6 +806,7 @@ class _HomeShellState extends State<HomeShell> {
             String sub,
             Color color,
             VoidCallback onTap,
+            int badge,
           })
         >[
           (
@@ -796,6 +815,7 @@ class _HomeShellState extends State<HomeShell> {
             sub: 'ເບິ່ງ / ຈັດການ',
             color: AppTheme.primary,
             onTap: _openJobs,
+            badge: 0,
           ),
           (
             icon: Icons.chat_bubble_rounded,
@@ -803,6 +823,7 @@ class _HomeShellState extends State<HomeShell> {
             sub: 'ຄຸຍກັບ office',
             color: AppTheme.info,
             onTap: _openChat,
+            badge: 0,
           ),
           (
             icon: Icons.local_gas_station_rounded,
@@ -810,6 +831,7 @@ class _HomeShellState extends State<HomeShell> {
             sub: 'ບັນທຶກເຕີມ',
             color: AppTheme.warning,
             onTap: _openAddFuel,
+            badge: 0,
           ),
           (
             icon: Icons.fact_check_rounded,
@@ -817,6 +839,7 @@ class _HomeShellState extends State<HomeShell> {
             sub: 'ກວດ / ສົ່ງອານຸມັດ',
             color: AppTheme.info,
             onTap: _openInspection,
+            badge: _pendingInspections,
           ),
           (
             icon: Icons.refresh_rounded,
@@ -824,6 +847,7 @@ class _HomeShellState extends State<HomeShell> {
             sub: 'ອັບເດດຂໍ້ມູນ',
             color: AppTheme.success,
             onTap: _fetchAll,
+            badge: 0,
           ),
         ];
     return GridView.count(
@@ -838,7 +862,14 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Widget _bigAction(
-    ({IconData icon, String label, String sub, Color color, VoidCallback onTap})
+    ({
+      IconData icon,
+      String label,
+      String sub,
+      Color color,
+      VoidCallback onTap,
+      int badge,
+    })
     a,
   ) {
     return Material(
@@ -861,13 +892,47 @@ class _HomeShellState extends State<HomeShell> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(9),
-                    decoration: BoxDecoration(
-                      color: a.color.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(a.icon, color: a.color, size: 21),
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(9),
+                        decoration: BoxDecoration(
+                          color: a.color.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(a.icon, color: a.color, size: 21),
+                      ),
+                      if (a.badge > 0)
+                        Positioned(
+                          right: -4,
+                          top: -4,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 1,
+                            ),
+                            constraints: const BoxConstraints(minWidth: 16),
+                            decoration: BoxDecoration(
+                              color: AppTheme.error,
+                              borderRadius: BorderRadius.circular(9),
+                              border: Border.all(
+                                color: AppTheme.bgCard,
+                                width: 1.5,
+                              ),
+                            ),
+                            child: Text(
+                              a.badge > 99 ? '99+' : '${a.badge}',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 9,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                   Icon(
                     Icons.arrow_forward_ios_rounded,
