@@ -120,12 +120,19 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
       });
       // Start/stop continuous GPS tracking immediately when this trip's dispatch
       // state changes (e.g. right after "ເລີ່ມຈັດສົ່ງ" or "ປິດງານ").
-      LocationTrackingService.instance.sync(
-        jobs: jobs,
-        baseUrl: widget.controller.baseUrl,
-        authToken: widget.controller.user!.token,
-        driverId: widget.controller.user!.driverId,
-      );
+      // Only the driver responsible for the trip posts GPS. A manager/supervisor
+      // opens this screen read-only to watch a driver's trip — if they tracked,
+      // the office would receive the *manager's* location tagged to the driver's
+      // trip, so never start tracking for operations users or read-only views.
+      final user = widget.controller.user!;
+      if (!widget.readOnly && user.isDriverOnly) {
+        LocationTrackingService.instance.sync(
+          jobs: jobs,
+          baseUrl: widget.controller.baseUrl,
+          authToken: user.token,
+          driverId: user.driverId,
+        );
+      }
     } catch (e) {
       if (!silent) setState(() => _loading = false);
       if (mounted) {
@@ -709,23 +716,42 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     );
   }
 
-  // One tap: silently capture the current GPS (check-in) and go straight to the
-  // complete form — no separate map-confirm step or second "ສຳເລັດ" press.
+  // "ສຳເລັດ" walks the driver through the delivery in order:
+  //   (1) confirm GPS on the map (Check-in) — the driver sees where they are vs
+  //       the delivery point and taps "ຕໍ່ໄປ", then
+  //   (2) the complete form with the bill's item list.
+  // The map screen returns the confirmed Position (null on cancel), so the GPS
+  // saved at check-in is the one the driver verified on the map.
   Future<void> _checkInBill(DeliveryBill b) async {
+    // Step 1: GPS confirmation on the map (mirrors _receiveFromCustomer — the
+    // screen pops a geolocator Position, or null when the driver backs out).
+    final pos = await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => CheckinMapScreen(bill: b)));
+    if (pos == null || !mounted) return; // map step cancelled
+
     setState(() => _busy = true);
     try {
-      final loc = await _getLocation();
       await widget.controller.api.checkInBill(
         billNo: b.billNo,
-        lat: loc['lat']!,
-        lng: loc['lng']!,
+        lat: pos.latitude.toString(),
+        lng: pos.longitude.toString(),
       );
       await _loadData(silent: true);
       if (!mounted) return;
       final updatedBill =
           _bills.where((bill) => bill.billNo == b.billNo).firstOrNull ?? b;
       setState(() => _busy = false);
-      await _completeBill(updatedBill);
+      // Step 2: complete form (item list → photo → signature). Reuse the GPS
+      // the driver just confirmed on the map so check-in and complete are
+      // recorded at the same point — no second silent location capture.
+      await _completeBill(
+        updatedBill,
+        checkInLoc: {
+          'lat': pos.latitude.toString(),
+          'lng': pos.longitude.toString(),
+        },
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -736,7 +762,14 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     }
   }
 
-  Future<void> _completeBill(DeliveryBill b) async {
+  // [checkInLoc] is the GPS the driver confirmed on the check-in map. When the
+  // complete flow follows straight from check-in we reuse it so both actions
+  // land on the same coordinates; for the standalone "ສຳເລັດ" button (a bill
+  // already checked in) it's null and we capture a fresh fix.
+  Future<void> _completeBill(
+    DeliveryBill b, {
+    Map<String, String>? checkInLoc,
+  }) async {
     final r = await Navigator.of(context).push<_CompResult>(
       MaterialPageRoute(
         builder: (_) => _CompPage(api: widget.controller.api, bill: b),
@@ -747,7 +780,7 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
     if (r.isCancelled) {
       await _runAction(
         () async {
-          final l = await _getLocation();
+          final l = checkInLoc ?? await _getLocation();
           await widget.controller.api.cancelBill(
             billNo: b.billNo,
             comment: r.comment,
@@ -793,7 +826,7 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
 
     await _runAction(
       () async {
-        final l = await _getLocation();
+        final l = checkInLoc ?? await _getLocation();
         await widget.controller.api.completeBill(
           billNo: b.billNo,
           items: r.items,
@@ -2401,6 +2434,9 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Show the driver their live point before they receive the trip, so
+          // they can confirm the GPS fix is good. Display-only.
+          if (_job.jobStatus == 0) const _CurrentLocationBanner(),
           if (hint != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
@@ -2492,6 +2528,132 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// Live "you are here" readout shown above the "ຮັບຖ້ຽວ" button. Display-only —
+// the receive action doesn't post this point; it just lets the driver confirm
+// their current location before receiving the trip.
+class _CurrentLocationBanner extends StatefulWidget {
+  const _CurrentLocationBanner();
+
+  @override
+  State<_CurrentLocationBanner> createState() => _CurrentLocationBannerState();
+}
+
+class _CurrentLocationBannerState extends State<_CurrentLocationBanner> {
+  StreamSubscription<Position>? _sub;
+  Position? _pos;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _start();
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _start() async {
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        if (mounted) setState(() => _error = 'ກະລຸນາເປີດ GPS');
+        return;
+      }
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.denied ||
+          perm == LocationPermission.deniedForever) {
+        if (mounted) setState(() => _error = 'ບໍ່ໄດ້ສິດເຂົ້າເຖິງ GPS');
+        return;
+      }
+      // One-shot fix first so the readout fills in fast, then a stream keeps it
+      // current as the driver moves.
+      try {
+        final first = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+          ),
+        );
+        if (mounted) setState(() => _pos = first);
+      } catch (_) {
+        // ignore; the stream below fills it in when ready.
+      }
+      _sub =
+          Geolocator.getPositionStream(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+              distanceFilter: 3,
+            ),
+          ).listen(
+            (p) {
+              if (mounted) setState(() => _pos = p);
+            },
+            onError: (_) {},
+          );
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pos = _pos;
+    final ready = pos != null;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.surfaceBorder),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            ready
+                ? Icons.my_location_rounded
+                : Icons.location_searching_rounded,
+            size: 18,
+            color: ready ? AppTheme.success : AppTheme.warning,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'ຈຸດທີ່ຢູ່ປະຈຸບັນ',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: AppTheme.textMuted,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  ready
+                      ? '${pos.latitude.toStringAsFixed(6)}, ${pos.longitude.toStringAsFixed(6)}'
+                      : (_error ?? 'ກຳລັງຫາ GPS...'),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: ready ? AppTheme.textBright : AppTheme.warning,
+                  ),
+                ),
+              ],
             ),
           ),
         ],

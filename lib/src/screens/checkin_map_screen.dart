@@ -448,11 +448,11 @@ class _CheckinMapScreenState extends State<CheckinMapScreen> {
                                       ),
                                     )
                                   : const Icon(
-                                      Icons.location_on_rounded,
+                                      Icons.arrow_forward_rounded,
                                       size: 20,
                                     ),
                               label: const Text(
-                                'ຢືນຢັນ Check-in',
+                                'ຕໍ່ໄປ',
                                 style: TextStyle(
                                   fontSize: 14,
                                   fontWeight: FontWeight.w900,

@@ -115,12 +115,15 @@ class _JobsScreenState extends State<JobsScreen> with WidgetsBindingObserver {
         _refreshing = false;
         _error = null;
       });
-      LocationTrackingService.instance.sync(
-        jobs: data,
-        baseUrl: widget.controller.baseUrl,
-        authToken: user.token,
-        driverId: user.driverId,
-      );
+      // Only drivers post GPS for their own trips — never operations staff.
+      if (user.isDriverOnly) {
+        LocationTrackingService.instance.sync(
+          jobs: data,
+          baseUrl: widget.controller.baseUrl,
+          authToken: user.token,
+          driverId: user.driverId,
+        );
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
