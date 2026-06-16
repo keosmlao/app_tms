@@ -36,14 +36,22 @@ class AppController extends ChangeNotifier {
   String? get pendingDocNo => _pendingDocNo;
   MobileSettings get settings => _settings;
   AppUpdateInfo? get appUpdate => _appUpdate;
-  // When true the whole app is blocked behind the update screen.
-  bool get mustUpdate => _appUpdate?.forceUpdate == true;
+  // When true the whole app is blocked behind the update screen. Every update
+  // is mandatory: as soon as the backend reports a newer version exists
+  // (update_available) — not only an explicit force_update — the app blocks
+  // until the driver installs the new APK.
+  bool get mustUpdate =>
+      _appUpdate?.forceUpdate == true || _appUpdate?.updateAvailable == true;
 
   // Record the latest update policy from the backend (login/settings/426).
-  // Only escalates to a blocking state — a forced flag is never cleared by a
-  // later non-forced response within the same session.
+  // Only escalates to a blocking state — once an update is required, a later
+  // relaxed response (e.g. a stale/cached fetch) won't unblock the app within
+  // the same session.
   void setAppUpdate(AppUpdateInfo info) {
-    if (_appUpdate?.forceUpdate == true && !info.forceUpdate) return;
+    final wasBlocking =
+        _appUpdate?.forceUpdate == true || _appUpdate?.updateAvailable == true;
+    final willBlock = info.forceUpdate || info.updateAvailable;
+    if (wasBlocking && !willBlock) return;
     _appUpdate = info;
     notifyListeners();
   }
