@@ -37,8 +37,10 @@ void main() {
 
     expect(find.text('ເຂົ້າສູ່ລະບົບ'), findsWidgets);
     expect(find.byType(TextFormField), findsNWidgets(2));
-    expect(find.text('ຈື່ຂ້ອຍໄວ້'), findsOneWidget);
+    expect(find.text('ຈົດຈຳການເຂົ້າສູ່ລະບົບ'), findsOneWidget);
     expect(find.textContaining('ODG TMS'), findsOneWidget);
-    expect(find.text('ເລີ່ມພາລະກິດ'), findsOneWidget);
+    // Submit button: now labelled 'ເຂົ້າສູ່ລະບົບ' (same as the header) with a
+    // forward arrow — assert the arrow so it's distinct from the header text.
+    expect(find.byIcon(Icons.arrow_forward_rounded), findsOneWidget);
   });
 }

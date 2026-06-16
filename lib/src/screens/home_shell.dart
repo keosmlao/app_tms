@@ -40,6 +40,12 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
+    // Ask for location / battery / notification access once, on first launch.
+    // No-ops on every launch after the first.
+    LocationTrackingService.instance.ensureOnboardingPermissions();
+    // If background tracking hit an expired session (e.g. after a reboot
+    // resume), prompt a re-login so GPS can resume.
+    _checkAuthFailed();
     _loadDutyStatus();
     _fetchAll();
     _loadChatUnread();
@@ -143,7 +149,64 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  Future<void> _checkAuthFailed() async {
+    final failed = await LocationTrackingService.instance.consumeAuthFailed();
+    if (!failed || !mounted) return;
+    final reauth = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.bgCard,
+        icon: const Icon(Icons.lock_clock_rounded, color: AppTheme.warning),
+        title: const Text(
+          'ເຊສຊັນໝົດອາຍຸ',
+          style: TextStyle(color: AppTheme.textBright, fontSize: 16),
+        ),
+        content: const Text(
+          'ກະລຸນາເຂົ້າສູ່ລະບົບໃໝ່ ເພື່ອໃຫ້ການຕິດຕາມຖ້ຽວສືບຕໍ່ໄດ້.',
+          style: TextStyle(
+            color: AppTheme.textSecondary,
+            fontSize: 13,
+            height: 1.5,
+          ),
+        ),
+        actions: [
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.primary),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('ເຂົ້າສູ່ລະບົບໃໝ່'),
+          ),
+        ],
+      ),
+    );
+    // reauthenticate() drops the session but keeps the active trip + service
+    // running, so GPS resumes the moment a fresh token is written post-login.
+    if (reauth == true) await widget.controller.reauthenticate();
+  }
+
   Future<void> _logout() async {
+    // Block logout while a trip is in progress. Otherwise a driver could log
+    // out to silently kill GPS tracking before closing the trip — they must
+    // close the trip first. Check both the loaded jobs (job_status 1–2) AND the
+    // persisted active doc, so this holds even before the jobs list loads.
+    final hasActiveTrip =
+        _jobs.any((j) => j.jobStatus == 1 || j.jobStatus == 2) ||
+        await LocationTrackingService.instance.hasActiveTrip();
+    if (hasActiveTrip) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+          content: const Text(
+            'ກະລຸນາປິດຖ້ຽວທີ່ກຳລັງດຳເນີນກ່ອນ ຈຶ່ງຈະອອກຈາກລະບົບໄດ້',
+            style: TextStyle(fontWeight: FontWeight.w700),
+          ),
+        ),
+      );
+      return;
+    }
+    if (!mounted) return;
     final ok = await showDialog<bool>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.55),

@@ -3,11 +3,10 @@ import 'package:flutter/material.dart';
 import '../core/app_theme.dart';
 import '../services/location_tracking_service.dart';
 
-/// Small in-app banner that mirrors [LocationTrackingService.state]:
-///   * active         → reassures the driver GPS is being sent
-///   * needsPermission → prompts opening app settings to grant location
-///   * gpsOff          → prompts turning the device GPS on
-///   * off            → hidden (no active trip)
+/// In-app banner that ONLY appears when tracking is *broken* mid-trip — GPS
+/// turned off or location permission missing — so the driver is pushed to fix
+/// it. Normal operation ([TrackingState.active]) and no-trip ([off]) render
+/// nothing: the driver is never shown a "sending GPS" indicator.
 ///
 /// Drop it near the top of the home + job-detail screens.
 class GpsTrackingBanner extends StatelessWidget {
@@ -19,19 +18,15 @@ class GpsTrackingBanner extends StatelessWidget {
       valueListenable: LocationTrackingService.instance.state,
       builder: (context, st, _) {
         switch (st) {
+          // Silent in normal operation — no "sending GPS" reveal.
           case TrackingState.off:
-            return const SizedBox.shrink();
           case TrackingState.active:
-            return const _Banner(
-              color: AppTheme.success,
-              icon: Icons.gps_fixed_rounded,
-              text: 'ກຳລັງສົ່ງຕຳແໜ່ງ GPS',
-            );
+            return const SizedBox.shrink();
           case TrackingState.needsPermission:
             return _Banner(
               color: AppTheme.error,
               icon: Icons.location_disabled_rounded,
-              text: 'GPS ບໍ່ມີສິດ — ກົດເພື່ອເປີດ "ອະນຸຍາດຕະຫຼອດເວລາ"',
+              text: 'ກະລຸນາເປີດສິດ "ຕຳແໜ່ງ" ເພື່ອສືບຕໍ່ຖ້ຽວ',
               onTap: LocationTrackingService.instance.openAppPermissionSettings,
             );
           case TrackingState.gpsOff:

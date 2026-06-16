@@ -54,6 +54,13 @@ class AppController extends ChangeNotifier {
     if (wasBlocking && !willBlock) return;
     _appUpdate = info;
     notifyListeners();
+    // When an update becomes mandatory, log out any active session so the driver
+    // is signed out and lands on the blocking update screen (which shows the
+    // download link). After updating they log in fresh. This deliberately
+    // bypasses the in-app "trip active" logout guard — it's a system action.
+    if (willBlock && _user != null) {
+      unawaited(logout());
+    }
   }
 
   ApiClient get api => ApiClient(baseUrl: _baseUrl, authToken: _user?.token);
@@ -87,6 +94,27 @@ class AppController extends ChangeNotifier {
     }
     _isReady = true;
     notifyListeners();
+    // Extend the 8h token on each launch so long-running trips don't hit an
+    // expired session. Fire-and-forget — never blocks startup.
+    unawaited(refreshSessionToken());
+  }
+
+  /// Swap the stored session token for a fresh one (sliding 8h expiry). Safe to
+  /// call any time there's a session; no-ops if there's nothing to refresh or
+  /// the server rejects it (then the token rides until it truly expires).
+  Future<void> refreshSessionToken() async {
+    final current = _user;
+    if (current == null || current.token.isEmpty) return;
+    try {
+      final fresh = await api.refreshToken();
+      if (fresh == null || fresh.isEmpty || fresh == current.token) return;
+      _user = current.copyWith(token: fresh);
+      await storage.saveSession(baseUrl: _baseUrl, user: _user!);
+      OfflineOutbox.instance.setAuthToken(_user!.token);
+      _notifyAfterFrame();
+    } catch (_) {
+      // Keep the existing token on any failure.
+    }
   }
 
   // Pull the latest feature flags from the server. Silently keeps the cached
@@ -167,6 +195,18 @@ class AppController extends ChangeNotifier {
     OfflineOutbox.instance.setAuthToken(null);
     // Stop continuous GPS tracking + tear down its foreground service.
     unawaited(LocationTrackingService.instance.stop());
+    await storage.clear();
+    _notifyAfterFrame();
+  }
+
+  /// Session expired mid-trip (background tracking got a 401/403). Drop the
+  /// session so the driver must log in again — but, unlike [logout], do NOT
+  /// stop tracking: the active trip + foreground service stay alive, and GPS
+  /// resumes the instant sync() writes a fresh token after re-login.
+  Future<void> reauthenticate() async {
+    _user = null;
+    _pendingDocNo = null;
+    OfflineOutbox.instance.setAuthToken(null);
     await storage.clear();
     _notifyAfterFrame();
   }

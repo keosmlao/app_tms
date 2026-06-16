@@ -258,6 +258,22 @@ class ApiClient {
     return AuthUser.fromJson(body, fallbackUsername: username);
   }
 
+  /// Exchange the current (still-valid) token for a fresh 8h one. Used to keep
+  /// continuous GPS tracking alive past the token lifetime on long trips without
+  /// forcing a re-login. Returns the new token, or null if the server rejects
+  /// the refresh (e.g. token already fully expired → caller must re-login).
+  Future<String?> refreshToken() async {
+    try {
+      final body = await _post('/api/mobile/refresh', const {});
+      if (body is Map && body['token'] is String && body['token'].isNotEmpty) {
+        return body['token'] as String;
+      }
+    } catch (_) {
+      // Expired/unauthorized or network error — caller keeps the old token.
+    }
+    return null;
+  }
+
   Future<List<DeliveryJob>> getJobs({required String driverId}) async {
     _lastJobsFromCache = false;
     try {
@@ -746,6 +762,26 @@ class ApiClient {
       'doc_no': docNo,
       'lat': lat,
       'lng': lng,
+    }, timeout: const Duration(seconds: 10));
+  }
+
+  // Report the tracking *health* for an active trip when GPS can't be posted —
+  // the driver turned off location services, revoked permission, or the session
+  // expired mid-trip. Lets the control center distinguish "parked / no signal"
+  // from "driver disabled tracking". Best-effort, posted directly with a short
+  // timeout; failures are swallowed by the caller.
+  //
+  // NOTE: the backend must handle action 'tracking_status' (status is one of
+  // 'gps_off' | 'no_permission' | 'auth_expired'). If it doesn't yet, this call
+  // simply 4xx's and is ignored — nothing else breaks.
+  Future<void> reportTrackingStatus({
+    required String docNo,
+    required String status,
+  }) async {
+    await _post('/api/mobile/jobs', {
+      'action': 'tracking_status',
+      'doc_no': docNo,
+      'status': status,
     }, timeout: const Duration(seconds: 10));
   }
 

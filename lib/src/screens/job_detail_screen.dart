@@ -270,6 +270,22 @@ class _JobDetailScreenState extends State<JobDetailScreen> {
   }
 
   Future<void> _receiveJob() async {
+    // Pre-trip gate: GPS + location permission must be ON before the trip starts
+    // (tracking begins the moment job_status hits 1). If off, this drives the
+    // driver to enable them and blocks "ຮັບຖ້ຽວ" until ready.
+    final ready = await LocationTrackingService.instance.ensureLocationReady(
+      context,
+    );
+    if (!ready) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('ຕ້ອງເປີດ GPS ແລະ ສິດຕຳແໜ່ງກ່ອນຮັບຖ້ຽວ'),
+          backgroundColor: AppTheme.error,
+        ),
+      );
+      return;
+    }
     await _runAction(
       () => widget.controller.api.receiveJob(_job.docNo),
       'ຮັບຖ້ຽວແລ້ວ',
